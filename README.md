@@ -46,8 +46,6 @@ python universal_extractor_gui.py
 ```
 .
 ├── universal_extractor_gui.py    # 主程序入口（GUI版本）
-├── new_payloads_5g_4g_cfg.py    # 5G/4G配置数据导出
-├── new_payloads_warning_kpi.py  # 告警KPI数据导出
 ├── requirements.txt             # Python依赖列表
 ├── config.yaml                  # 配置文件
 ├── captcha_images/             # 验证码图片目录
