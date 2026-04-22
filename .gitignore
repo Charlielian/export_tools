@@ -33,3 +33,9 @@ config.yaml
 
 # 其他
 12333.txt
+1222111.txt
+1222221.txt
+.license_time
+
+# 授权工具私钥
+授权工具/private_key.pem

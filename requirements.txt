@@ -18,3 +18,6 @@ Pillow>=9.0.0
 
 # YAML 配置文件
 pyyaml>=6.0
+
+# Windows 系统信息获取
+wmi>=1.5.1
