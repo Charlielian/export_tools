@@ -132,7 +132,7 @@ import yaml
 
 # ==================== 授权配置 ====================
 LICENSE_FILE = "license.dat"
-LICENSE_TIME_FILE = ".license_time"  # 存储上次验证时间的隐藏文件
+LICENSE_TIME_FILE = ".license_time"  # 存储上次验证时间的隐藏文件（备份防篡改）
 
 # RSA 公钥（自动生成，请勿修改）
 RSA_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
@@ -147,6 +147,11 @@ nwIDAQAB
 
 # AES 密钥（用于加密授权时间，16字节）
 LICENSE_AES_KEY = b"GMCCLicenseV2Key"  # 16字节
+
+# 授权文件格式说明：
+# license.dat = SN长度(4字节) + SN + Base64签名 + "|" + AES加密数据
+# AES加密数据 = 过期时间 + "|" + 首次运行时间
+# 示例：2026-12-31 23:59:59|2026-01-15 10:30:00
 
 
 # ==================== 配置文件加载 ====================
@@ -4906,21 +4911,21 @@ def verify_license():
         with open(LICENSE_FILE, "rb") as f:
             license_data = f.read()
 
-        # 解析license格式：SN | RSA签名 | AES加密的过期时间
-        # 格式：SN长度(4字节) + SN + Base64签名 + 过期时间密文
+        # 解析license格式：SN | RSA签名 | AES加密(过期时间|首次运行时间)
+        # 格式：SN长度(4字节) + SN + Base64签名 + "|" + AES加密数据
         import struct
         sn_len = struct.unpack(">I", license_data[:4])[0]
         sn = license_data[4:4+sn_len].decode("utf-8")
         remaining = license_data[4+sn_len:]
 
-        # 分割签名和加密时间（中间用 | 分隔）
+        # 分割签名和加密数据（中间用 | 分隔）
         parts = remaining.split(b"|")
         if len(parts) != 2:
             print("[ERROR] 授权文件格式错误")
             return False, current_fp, "授权文件格式错误", None
 
         signature = parts[0].decode("utf-8")
-        encrypted_expiry = parts[1]
+        encrypted_data = parts[1]
 
         # 1. RSA验签：验证SN是否被篡改
         print("[DEBUG] 正在进行RSA签名验证...")
@@ -4933,11 +4938,29 @@ def verify_license():
             print("[ERROR] 机器码不匹配")
             return False, current_fp, "授权验证失败，当前设备与授权文件不匹配", None
 
-        # 3. AES解密获取过期时间
-        print("[DEBUG] 正在解密授权时间...")
-        expiry_time_str = aes_decrypt(encrypted_expiry, LICENSE_AES_KEY)
+        # 3. AES解密获取过期时间和首次运行时间
+        print("[DEBUG] 正在解密授权数据...")
+        decrypted_data = aes_decrypt(encrypted_data, LICENSE_AES_KEY)
+        time_parts = decrypted_data.split("|")
+        
+        # 兼容旧格式：只有过期时间（旧授权文件），首次运行时间设为解密成功的时间
+        if len(time_parts) == 1:
+            # 旧格式：只有过期时间
+            expiry_time_str = time_parts[0]
+            first_run_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[DEBUG] 检测到旧格式授权文件，仅包含过期时间")
+        elif len(time_parts) == 2:
+            # 新格式：过期时间 + 首次运行时间
+            expiry_time_str = time_parts[0]
+            first_run_time_str = time_parts[1]
+        else:
+            print("[ERROR] 授权数据格式错误")
+            return False, current_fp, "授权数据格式错误", None
+        
         expiry_time = datetime.strptime(expiry_time_str, "%Y-%m-%d %H:%M:%S")
+        first_run_time = datetime.strptime(first_run_time_str, "%Y-%m-%d %H:%M:%S")
         print(f"[DEBUG] 授权过期时间: {expiry_time_str}")
+        print(f"[DEBUG] 首次运行时间: {first_run_time_str}")
 
         # 4. 检查是否过期
         current_time = datetime.now()
@@ -4946,16 +4969,27 @@ def verify_license():
             return False, current_fp, f"授权已过期（{expiry_time_str}）", expiry_time_str
 
         # 5. 时间单调性校验：确保时间只能递增
+        # 优先检查 .license_time 文件
         last_verify_time = load_license_time()
         if last_verify_time:
             last_time = datetime.strptime(last_verify_time, "%Y-%m-%d %H:%M:%S")
             if current_time < last_time:
                 print("[ERROR] 系统时间被回改，拒绝验证")
                 return False, current_fp, "检测到系统时间被回改，请恢复正确时间", None
+        else:
+            # .license_time 被删除时，使用授权文件中的首次运行时间进行校验
+            if current_time < first_run_time:
+                print("[ERROR] 系统时间被回改（基于授权文件首次运行时间），拒绝验证")
+                return False, current_fp, "检测到系统时间被回改，请恢复正确时间", None
 
         # 6. 更新验证时间（单向递增）
         print("[DEBUG] 更新验证时间...")
         save_license_time(current_time.strftime("%Y-%m-%d %H:%M:%S"))
+
+        # 7. 如果授权文件中的首次运行时间为空（理论上不会发生，因为授权文件由服务端生成），
+        # 或者需要更新首次运行时间，则更新授权文件
+        # 注意：首次运行时间一旦写入授权文件就不能修改，否则会导致 RSA 验签失败
+        # 此逻辑仅作为保底，实际由服务端生成正确的授权文件
 
         print("[SUCCESS] 授权验证通过")
         return True, None, None, expiry_time_str

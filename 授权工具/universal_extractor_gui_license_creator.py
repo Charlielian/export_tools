@@ -93,23 +93,26 @@ def create_license(machine_code, expiry_date):
 
     # 生成授权时间字符串
     expiry_time_str = expiry_date.strftime("%Y-%m-%d 23:59:59")
+    
+    # 首次运行时间（生成授权时的时间）
+    first_run_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 1. 用AES加密过期时间
-    encrypted_expiry = aes_encrypt(expiry_time_str, LICENSE_AES_KEY)
+    # 1. 用AES加密（新格式：过期时间|首次运行时间）
+    encrypted_data = aes_encrypt(f"{expiry_time_str}|{first_run_time_str}", LICENSE_AES_KEY)
 
     # 2. 对机器码(SN)进行RSA签名
     signature = rsa_sign(machine_code, private_key)
 
-    # 3. 组装license文件格式：SN长度(4字节) + SN + 签名 + | + AES加密时间
+    # 3. 组装license文件格式：SN长度(4字节) + SN + 签名 + | + AES加密(过期时间|首次运行时间)
     sn_bytes = machine_code.encode("utf-8")
     sn_len = len(sn_bytes)
-    license_data = struct.pack(">I", sn_len) + sn_bytes + signature.encode("utf-8") + b"|" + encrypted_expiry
+    license_data = struct.pack(">I", sn_len) + sn_bytes + signature.encode("utf-8") + b"|" + encrypted_data
 
     # 4. 写入文件
     with open(LICENSE_FILE, "wb") as f:
         f.write(license_data)
 
-    return True, f"授权文件已生成：{os.path.abspath(LICENSE_FILE)}\n授权机器码：{machine_code}\n过期时间：{expiry_time_str}"
+    return True, f"授权文件已生成：{os.path.abspath(LICENSE_FILE)}\n授权机器码：{machine_code}\n过期时间：{expiry_time_str}\n首次运行时间：{first_run_time_str}"
 
 
 def main():
