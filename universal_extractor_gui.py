@@ -112,6 +112,7 @@ print = debug_print
 import requests
 import pandas as pd
 from lxml import etree
+from openpyxl import load_workbook, Workbook
 try:
     from Crypto.PublicKey import RSA
     from Crypto.Cipher import PKCS1_v1_5
@@ -3450,6 +3451,41 @@ class CustomDataExtractor:
             print(f"保存文件失败: {e}")
             return None
 
+    def _append_df_to_excel(self, filepath, df, sheet_name):
+        """追加 DataFrame 到已存在的 Excel 文件（追加模式）"""
+        try:
+            # 使用 append 模式打开已存在的文件
+            with pd.ExcelWriter(filepath, engine='openpyxl', mode='a') as writer:
+                # 删除已存在的同名 Sheet（如果存在）
+                if sheet_name in writer.sheets:
+                    del writer.sheets[sheet_name]
+                # 写入数据
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+        except Exception as e:
+            print(f"追加数据到Excel失败: {e}")
+            raise
+
+    def _finalize_per_day_excel(self, filepath, expected_sheets):
+        """清理按日分Sheet模式创建的临时文件"""
+        try:
+            if os.path.exists(filepath):
+                book = load_workbook(filepath)
+                
+                # 删除初始化 Sheet（如果存在）
+                if '_init_' in book.sheetnames:
+                    del book['_init_']
+                
+                # 如果没有任何有效数据 Sheet，删除整个文件
+                if len(book.sheetnames) == 0:
+                    book.close()
+                    os.remove(filepath)
+                    return
+                
+                book.save(filepath)
+                book.close()
+        except Exception as e:
+            print(f"清理Excel文件失败: {e}")
+
 
 # ==================== 数据表配置 ====================
 class TableConfig:
@@ -4468,9 +4504,18 @@ class UniversalExtractorGUI:
                         
                         # 用于收集所有日期的数据（合并模式）
                         all_dfs = []
-                        # 用于按日分Sheet模式：保存 {日期: DataFrame}
-                        date_dfs = {}
                         total_rows = 0
+                        
+                        # 用于按日分Sheet模式：直接写入Excel，无需先收集到内存
+                        per_day_filepath = None
+                        saved_days_count = 0
+                        if is_per_day_sheet:
+                            ensure_dirs()
+                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                            filename = f'{table_name}_{city}_{start_date}_{end_date}_{timestamp}.xlsx'
+                            per_day_filepath = os.path.join(OUTPUT_DIR, filename)
+                            # 预创建文件（使用空的 DataFrame）
+                            pd.DataFrame().to_excel(per_day_filepath, index=False, engine='openpyxl', sheet_name='_init_')
                         
                         while current_dt <= end_dt:
                             day_num += 1
@@ -4503,8 +4548,10 @@ class UniversalExtractorGUI:
                                     self.log(f"  ⚠ {current_date_str}: 未查询到数据", "WARNING")
                                 else:
                                     if is_per_day_sheet:
-                                        # 按日分Sheet模式：保存每天的数据
-                                        date_dfs[current_date_str] = df
+                                        # 按日分Sheet模式：查完即写，无需收集到内存
+                                        sheet_name = current_date_str.replace('-', '')
+                                        self.extractor._append_df_to_excel(per_day_filepath, df, sheet_name)
+                                        saved_days_count += 1
                                     else:
                                         # 合并模式：收集每天的数据
                                         all_dfs.append(df)
@@ -4516,31 +4563,17 @@ class UniversalExtractorGUI:
                             
                             current_dt += timedelta(days=1)
                         
-                        # 所有日期提取完成后，保存文件
-                        if is_per_day_sheet and date_dfs:
-                            # 按日分Sheet模式：每天数据保存为独立的Sheet
-                            self.update_progress_bar(
-                                int(((idx + 0.8) / total_tables) * 100), 
-                                "正在按日分Sheet保存数据..."
-                            )
-                            
-                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                            filename = f'{table_name}_{city}_{start_date}_{end_date}_{timestamp}.xlsx'
-                            filepath = os.path.join(OUTPUT_DIR, filename)
-                            
-                            try:
-                                with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-                                    for date_str, df in date_dfs.items():
-                                        # Sheet名称使用日期，特殊字符会被Excel自动处理
-                                        sheet_name = date_str.replace('-', '')
-                                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                                
-                                self.log(f"  ✓ 按日分Sheet保存成功！共 {total_rows} 条记录，{len(date_dfs)} 个Sheet", "SUCCESS")
-                                self.log(f"    文件已保存: {filepath}", "SUCCESS")
-                                success_count += 1
-                            except Exception as e:
-                                self.log(f"  ✗ 保存文件失败: {e}", "ERROR")
-                                failed_count += 1
+                        # 按日分Sheet模式：清理并完成
+                        if is_per_day_sheet and saved_days_count > 0:
+                            self.extractor._finalize_per_day_excel(per_day_filepath, saved_days_count)
+                            self.log(f"  ✓ 按日分Sheet保存成功！共 {total_rows} 条记录，{saved_days_count} 个Sheet", "SUCCESS")
+                            self.log(f"    文件已保存: {per_day_filepath}", "SUCCESS")
+                            success_count += 1
+                        elif is_per_day_sheet and saved_days_count == 0:
+                            # 所有日期都无数据，删除空文件
+                            if per_day_filepath and os.path.exists(per_day_filepath):
+                                os.remove(per_day_filepath)
+                            self.log(f"  ⚠ 所有日期均未查询到数据", "WARNING")
                         elif all_dfs:
                             # 合并模式：合并所有日期的数据并保存
                             self.update_progress_bar(
