@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-latest
     
     steps:
     - uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
     
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx universal_extractor_gui.py
+        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx --add-data "授权工具/public_key.pem;授权工具" universal_extractor_gui.py
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
