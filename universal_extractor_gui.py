@@ -132,27 +132,9 @@ import yaml
 
 
 # ==================== 授权配置 ====================
-LICENSE_FILE = "license.dat"
-LICENSE_TIME_FILE = ".license_time"  # 存储上次验证时间的隐藏文件（备份防篡改）
-
-# RSA 公钥（自动生成，请勿修改）
-RSA_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyCA2xeazcnBg2eFXryZx
-SqAlLlNFzM2wArRttt5gze2ZlxMISAz74sQJ5vh7gbXZPzG+ogT5mfxrhJT4OS5d
-EHvwD5O1HP52i0jTO8mGZGUem9TN7Z7VQOaknjbn83+mEY86s5atjClcs4ZwJxBt
-aDyI71rpeyh4kx6C2GrJqmFoPNiGUBBhWfhRSIEA1A67AR9o7K0Fuzkk48BNbQ2V
-so9ZffObodjrPpKwS56cX7FonBxb34ffJFQIe3MHxrQw4vp+SilkEJGyvYb8AUNh
-VNaNG/n0A+OIX3z14GogNBUwENSKIZTTTQUc6RTLNHD4U9feMM93xNM3KNvPPfRn
-nwIDAQAB
------END PUBLIC KEY-----"""
-
-# AES 密钥（用于加密授权时间，16字节）
-LICENSE_AES_KEY = b"GMCCLicenseV2Key"  # 16字节
-
-# 授权文件格式说明：
-# license.dat = SN长度(4字节) + SN + Base64签名 + "|" + AES加密数据
-# AES加密数据 = 过期时间 + "|" + 首次运行时间
-# 示例：2026-12-31 23:59:59|2026-01-15 10:30:00
+# 到期日期（格式：YYYY-MM-DD）
+# 修改这里即可设置软件到期日期
+EXPIRY_DATE = "2026-06-30"
 
 
 # ==================== 配置文件加载 ====================
@@ -3712,12 +3694,12 @@ class UniversalExtractorGUI:
         """更新授权时间显示"""
         if self.expiry_time:
             try:
-                # 解析过期时间，只显示日期部分
-                expiry_dt = datetime.strptime(self.expiry_time, "%Y-%m-%d %H:%M:%S")
+                # 解析过期时间
+                expiry_dt = datetime.strptime(self.expiry_time, "%Y-%m-%d")
                 display_time = expiry_dt.strftime("%Y-%m-%d")
                 
                 # 计算剩余天数
-                current_dt = datetime.now()
+                current_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
                 days_left = (expiry_dt - current_dt).days
                 
                 if days_left < 0:
@@ -4463,6 +4445,21 @@ class UniversalExtractorGUI:
             start_date = self.get_date_string(self.start_year_var, self.start_month_var, self.start_day_var)
             end_date = self.get_date_string(self.end_year_var, self.end_month_var, self.end_day_var)
             
+            # 检查查询日期是否超过授权到期日期
+            if self.expiry_time:
+                try:
+                    expiry_dt = datetime.strptime(self.expiry_time, "%Y-%m-%d")
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    
+                    if end_dt > expiry_dt:
+                        self.log(f"[ERROR] 查询日期超过授权到期日期 ({self.expiry_time})，拒绝执行", "ERROR")
+                        self.root.after(0, lambda: self._show_query_blocked_dialog(start_date, end_date))
+                        self.root.after(0, lambda: self._extract_failed_ui())
+                        return
+                except ValueError:
+                    pass
+            
             # 检查是否启用多日模式
             is_multi_day = self.multi_day_var.get()
             is_per_day_sheet = self.multi_day_per_sheet_var.get() if is_multi_day else False
@@ -4669,6 +4666,14 @@ class UniversalExtractorGUI:
         self.update_progress_bar(0, "提取失败")
         self.status_text.config(text="提取失败")
 
+    def _show_query_blocked_dialog(self, start_date, end_date):
+        """显示查询被阻止的弹窗"""
+        messagebox.showwarning(
+            "查询被阻止",
+            f"查询日期范围 ({start_date} 至 {end_date}) 超过授权到期日期 ({self.expiry_time})\n\n"
+            f"请修改查询日期或联系管理员更新授权。"
+        )
+
     def stop_extract(self):
         """停止提取"""
         messagebox.showinfo("提示", "停止功能开发中...")
@@ -4754,356 +4759,80 @@ class UniversalExtractorGUI:
         self.root.destroy()
 
 
-# ==================== 授权验证模块 ====================
-import hashlib
-import platform
-import subprocess
-
-def get_macos_hw_info():
-    """获取macOS硬件信息"""
-    hw_info = {"cpu_id": "", "board_sn": "", "disk_sn": "", "mac": ""}
-    try:
-        cmd = ["ioreg", "-l", "-w0", "-r", "-c", "IOPlatformExpertDevice", "-d", "2"]
-        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8")
-        hw_info["board_sn"] = output.split('"IOPlatformSerialNumber" = ')[1].split('"')[1].strip()
-    except:
-        hw_info["board_sn"] = "unknown_board"
-    try:
-        cmd = ["sysctl", "-n", "machdep.cpu.brand_string"]
-        hw_info["cpu_id"] = subprocess.check_output(cmd).decode("utf-8").strip()
-    except:
-        hw_info["cpu_id"] = "unknown_cpu"
-    try:
-        cmd = ["diskutil", "info", "/"]
-        output = subprocess.check_output(cmd).decode("utf-8")
-        hw_info["disk_sn"] = output.split("Volume UUID:")[1].split("\n")[0].strip()
-    except:
-        hw_info["disk_sn"] = "unknown_disk"
-    try:
-        cmd = ["ifconfig", "en0"]
-        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8")
-        hw_info["mac"] = output.split("ether")[1].split(" ")[1].strip().replace(":", "")
-    except:
-        hw_info["mac"] = "unknown_mac"
-    return hw_info
-
-
-def get_windows_hw_info():
-    """获取Windows硬件信息"""
-    try:
-        import wmi
-        c = wmi.WMI()
-        hw_info = {"cpu_id": "", "board_sn": "", "disk_sn": "", "mac": ""}
-        cpu_list = c.Win32_Processor()
-        hw_info["cpu_id"] = cpu_list[0].ProcessorId.strip() if (cpu_list and cpu_list[0].ProcessorId) else "unknown_cpu"
-        board_list = c.Win32_BaseBoard()
-        hw_info["board_sn"] = board_list[0].SerialNumber.strip() if (board_list and board_list[0].SerialNumber) else "unknown_board"
-        disk_list = c.Win32_DiskDrive()
-        hw_info["disk_sn"] = disk_list[0].SerialNumber.strip() if (disk_list and disk_list[0].SerialNumber) else "unknown_disk"
-        nic_list = c.Win32_NetworkAdapterConfiguration(IPEnabled=True)
-        hw_info["mac"] = nic_list[0].MACAddress.strip().replace(":", "") if (nic_list and nic_list[0].MACAddress) else "unknown_mac"
-        return hw_info
-    except:
-        return {"cpu_id": "unknown", "board_sn": "unknown", "disk_sn": "unknown", "mac": "unknown"}
-
-
-def get_linux_hw_info():
-    """获取Linux硬件信息"""
-    hw_info = {"cpu_id": "", "board_sn": "", "disk_sn": "", "mac": ""}
-    try:
-        with open("/proc/cpuinfo", "r") as f:
-            for line in f.readlines():
-                if "serial" in line.lower():
-                    hw_info["cpu_id"] = line.split(":")[1].strip()
-                    break
-        hw_info["cpu_id"] = hw_info["cpu_id"] if hw_info["cpu_id"] else "unknown_cpu"
-    except:
-        hw_info["cpu_id"] = "unknown_cpu"
-    try:
-        with open("/sys/devices/virtual/dmi/id/board_serial", "r") as f:
-            hw_info["board_sn"] = f.read().strip()
-    except:
-        hw_info["board_sn"] = "unknown_board"
-    try:
-        cmd = ["lsblk", "-o", "SERIAL", "-n", "/dev/sda"]
-        hw_info["disk_sn"] = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8").strip()
-    except:
-        hw_info["disk_sn"] = "unknown_disk"
-    try:
-        for path in ["/sys/class/net/eth0/address", "/sys/class/net/ens33/address"]:
-            if os.path.exists(path):
-                with open(path, "r") as f:
-                    hw_info["mac"] = f.read().strip().replace(":", "")
-                break
-        hw_info["mac"] = hw_info.get("mac", "unknown_mac")
-    except:
-        hw_info["mac"] = "unknown_mac"
-    return hw_info
-
-
-def get_hw_info():
-    """跨平台获取硬件信息"""
-    system = platform.system()
-    if system == "Windows":
-        return get_windows_hw_info()
-    elif system == "Darwin":
-        return get_macos_hw_info()
-    elif system == "Linux":
-        return get_linux_hw_info()
-    else:
-        return {"cpu_id": "unknown", "board_sn": "unknown", "disk_sn": "unknown", "mac": "unknown"}
-
-
-def generate_machine_fingerprint(hw_info):
-    """生成机器指纹"""
-    raw_str = f"{hw_info['cpu_id']}-{hw_info['board_sn']}-{hw_info['disk_sn']}-{hw_info['mac']}"
-    return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
-
-
 # ==================== 授权验证系统 ====================
+# 新授权方式：仅使用到期日期，移除机器码绑定
+# 软件超过到期日期不能打开，但修改系统时间可打开但不能查询超过到期日期的数据
 
-def aes_encrypt(plain_text, key):
-    """AES加密"""
-    import os
-    iv = os.urandom(16)
-    cipher = AES_Cipher.new(key, AES_Cipher.MODE_CBC, iv)
-    padded_data = pad(plain_text.encode("utf-8"), 16)
-    encrypted_data = cipher.encrypt(padded_data)
-    return iv + encrypted_data
-
-
-def aes_decrypt(encrypted_data, key):
-    """AES解密"""
-    iv = encrypted_data[:16]
-    cipher = AES_Cipher.new(key, AES_Cipher.MODE_CBC, iv)
-    decrypted_data = unpad(cipher.decrypt(encrypted_data[16:]), 16)
-    return decrypted_data.decode("utf-8")
-
-
-def rsa_verify(data, signature, public_key_pem):
-    """RSA签名验证"""
-    try:
-        from Crypto.Hash import SHA256
-        from Crypto.Signature import pkcs1_15
-
-        key = RSA.import_key(public_key_pem)
-        h = SHA256.new(data.encode("utf-8"))
-        verifier = pkcs1_15.new(key)
-        verifier.verify(h, base64.b64decode(signature))
-        return True
-    except Exception as e:
-        print(f"[ERROR] RSA验签失败: {e}")
-        return False
-
-
-def rsa_sign(data, private_key):
-    """RSA签名（服务端使用）"""
-    from Crypto.Hash import SHA256
-    from Crypto.Signature import pkcs1_15
-    h = SHA256.new(data.encode("utf-8"))
-    signature = pkcs1_15.new(private_key).sign(h)
-    return base64.b64encode(signature).decode("utf-8")
-
-
-def load_license_time():
-    """加载上次验证时间"""
-    if os.path.exists(LICENSE_TIME_FILE):
-        try:
-            with open(LICENSE_TIME_FILE, "rb") as f:
-                encrypted_time = f.read()
-            return aes_decrypt(encrypted_time, LICENSE_AES_KEY)
-        except:
-            pass
-    return None
-
-
-def save_license_time(verify_time):
-    """保存验证时间（使用AES加密）"""
-    encrypted_time = aes_encrypt(verify_time, LICENSE_AES_KEY)
-    with open(LICENSE_TIME_FILE, "wb") as f:
-        f.write(encrypted_time)
-
-
-def verify_license():
-    """验证授权，返回 (是否通过, 机器码, 错误信息, 过期时间)"""
-    print("[DEBUG] 开始授权验证...")
-
-    placeholder_key = "-----BEGIN PUBLIC KEY-----\n请在这里粘贴你的RSA公钥内容\n-----END PUBLIC KEY-----"
-    if RSA_PUBLIC_KEY.strip() == placeholder_key.strip():
-        print("[ERROR] 请先配置RSA公钥！")
-        return False, None, "未配置RSA公钥，请联系开发者", None
-
-    current_fp = generate_machine_fingerprint(get_hw_info())
-    print(f"[DEBUG] 当前机器码: {current_fp}")
-
-    if not os.path.exists(LICENSE_FILE):
-        print("[DEBUG] 未找到 license.dat 文件")
-        return False, current_fp, "未检测到授权文件（license.dat）", None
-
-    try:
-        with open(LICENSE_FILE, "rb") as f:
-            license_data = f.read()
-
-        # 解析license格式：SN | RSA签名 | AES加密(过期时间|首次运行时间)
-        # 格式：SN长度(4字节) + SN + Base64签名 + "|" + AES加密数据
-        import struct
-        sn_len = struct.unpack(">I", license_data[:4])[0]
-        sn = license_data[4:4+sn_len].decode("utf-8")
-        remaining = license_data[4+sn_len:]
-
-        # 分割签名和加密数据（中间用 | 分隔）
-        parts = remaining.split(b"|")
-        if len(parts) != 2:
-            print("[ERROR] 授权文件格式错误")
-            return False, current_fp, "授权文件格式错误", None
-
-        signature = parts[0].decode("utf-8")
-        encrypted_data = parts[1]
-
-        # 1. RSA验签：验证SN是否被篡改
-        print("[DEBUG] 正在进行RSA签名验证...")
-        if not rsa_verify(sn, signature, RSA_PUBLIC_KEY):
-            print("[ERROR] RSA签名验证失败")
-            return False, current_fp, "授权签名验证失败，授权文件可能被篡改", None
-
-        # 2. 验证机器码是否匹配
-        if sn != current_fp:
-            print("[ERROR] 机器码不匹配")
-            return False, current_fp, "授权验证失败，当前设备与授权文件不匹配", None
-
-        # 3. AES解密获取过期时间和首次运行时间
-        print("[DEBUG] 正在解密授权数据...")
-        decrypted_data = aes_decrypt(encrypted_data, LICENSE_AES_KEY)
-        time_parts = decrypted_data.split("|")
-        
-        # 兼容旧格式：只有过期时间（旧授权文件），首次运行时间设为解密成功的时间
-        if len(time_parts) == 1:
-            # 旧格式：只有过期时间
-            expiry_time_str = time_parts[0]
-            first_run_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[DEBUG] 检测到旧格式授权文件，仅包含过期时间")
-        elif len(time_parts) == 2:
-            # 新格式：过期时间 + 首次运行时间
-            expiry_time_str = time_parts[0]
-            first_run_time_str = time_parts[1]
-        else:
-            print("[ERROR] 授权数据格式错误")
-            return False, current_fp, "授权数据格式错误", None
-        
-        expiry_time = datetime.strptime(expiry_time_str, "%Y-%m-%d %H:%M:%S")
-        first_run_time = datetime.strptime(first_run_time_str, "%Y-%m-%d %H:%M:%S")
-        print(f"[DEBUG] 授权过期时间: {expiry_time_str}")
-        print(f"[DEBUG] 首次运行时间: {first_run_time_str}")
-
-        # 4. 检查是否过期
-        current_time = datetime.now()
-        if current_time > expiry_time:
-            print("[ERROR] 授权已过期")
-            return False, current_fp, f"授权已过期（{expiry_time_str}）", expiry_time_str
-
-        # 5. 时间单调性校验：确保时间只能递增
-        # 优先检查 .license_time 文件
-        last_verify_time = load_license_time()
-        if last_verify_time:
-            last_time = datetime.strptime(last_verify_time, "%Y-%m-%d %H:%M:%S")
-            if current_time < last_time:
-                print("[ERROR] 系统时间被回改，拒绝验证")
-                return False, current_fp, "检测到系统时间被回改，请恢复正确时间", None
-        else:
-            # .license_time 被删除时，使用授权文件中的首次运行时间进行校验
-            if current_time < first_run_time:
-                print("[ERROR] 系统时间被回改（基于授权文件首次运行时间），拒绝验证")
-                return False, current_fp, "检测到系统时间被回改，请恢复正确时间", None
-
-        # 6. 更新验证时间（单向递增）
-        print("[DEBUG] 更新验证时间...")
-        save_license_time(current_time.strftime("%Y-%m-%d %H:%M:%S"))
-
-        # 7. 如果授权文件中的首次运行时间为空（理论上不会发生，因为授权文件由服务端生成），
-        # 或者需要更新首次运行时间，则更新授权文件
-        # 注意：首次运行时间一旦写入授权文件就不能修改，否则会导致 RSA 验签失败
-        # 此逻辑仅作为保底，实际由服务端生成正确的授权文件
-
-        print("[SUCCESS] 授权验证通过")
-        return True, None, None, expiry_time_str
-
-    except Exception as e:
-        print(f"[ERROR] 授权验证失败: {e}")
-        return False, current_fp, f"授权验证失败：{e}", None
-
-
-def show_machine_code_dialog(parent, machine_code, error_title="授权验证失败"):
-    """显示机器码弹窗，供用户复制发给作者"""
+def show_request_dialog(expiry_time_str):
+    """显示验证请求弹窗"""
     import tkinter as tk
     from tkinter import ttk
     
-    exit_flag = [False]
-    
-    # 创建根窗口
     root = tk.Tk()
-    root.title(error_title)
-    root.geometry("550x320")
+    root.title("授权验证请求")
+    root.geometry("450x250")
     root.resizable(False, False)
     
     # 居中显示
     root.update_idletasks()
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    x = (screen_width - 550) // 2
-    y = (screen_height - 320) // 2
-    root.geometry(f"550x320+{x}+{y}")
+    x = (root.winfo_screenwidth() // 2) - (450 // 2)
+    y = (root.winfo_screenheight() // 2) - (250 // 2)
+    root.geometry(f"450x250+{x}+{y}")
     
-    # 设置为始终在最前
-    root.attributes('-topmost', True)
-    
-    main_frame = ttk.Frame(root, padding="20")
+    main_frame = ttk.Frame(root, padding="25")
     main_frame.pack(fill=tk.BOTH, expand=True)
     
+    # 警告图标
+    ttk.Label(main_frame, text="⚠️", font=("Arial", 32)).pack(pady=(0, 15))
+    
     # 标题
-    ttk.Label(main_frame, text="授权验证失败，请联系作者",
-              font=("Arial", 14, "bold"), foreground="#D32F2F").pack(pady=(0, 10))
+    ttk.Label(main_frame, text="授权已过期",
+              font=("Microsoft YaHei UI", 14, "bold"), 
+              foreground="#D32F2F").pack(pady=(0, 10))
+    
+    # 到期日期信息
+    ttk.Label(main_frame, text=f"到期日期: {expiry_time_str}",
+              font=("Microsoft YaHei UI", 10),
+              foreground="#666666").pack(pady=(0, 5))
     
     # 提示信息
-    ttk.Label(main_frame, text="您的机器码如下，请复制后发给作者进行验证：",
-              font=("Arial", 10)).pack(anchor=tk.W, pady=(0, 5))
+    ttk.Label(main_frame, text="请联系管理员获取新的授权",
+              font=("Microsoft YaHei UI", 11),
+              wraplength=380, justify="center").pack(pady=(10, 0))
     
-    # 机器码文本框（可复制）
-    text_frame = ttk.Frame(main_frame)
-    text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-    
-    machine_text = tk.Text(text_frame, height=4, font=("Courier New", 11), wrap=tk.WORD,
-                           bg="#F5F5F5", fg="#333333")
-    machine_text.insert("1.0", machine_code)
-    machine_text.config(state=tk.DISABLED)  # 只读但可复制
-    machine_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=machine_text.yview)
-    machine_text.config(yscrollcommand=machine_scroll.set)
-    machine_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    machine_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-    
-    # 复制按钮
-    def copy_to_clipboard():
-        root.clipboard_clear()
-        root.clipboard_append(machine_code)
-        copy_btn.config(text="已复制!", state=tk.DISABLED)
-        root.after(2000, lambda: copy_btn.config(text="复制机器码", state=tk.NORMAL))
-    
-    button_frame = ttk.Frame(main_frame)
-    button_frame.pack(fill=tk.X, pady=(15, 0))
-    
-    copy_btn = ttk.Button(button_frame, text="复制机器码", command=copy_to_clipboard)
-    copy_btn.pack(side=tk.LEFT, padx=5)
-    
-    def do_exit():
-        exit_flag[0] = True
-        root.destroy()
-    
-    exit_btn = ttk.Button(button_frame, text="退出程序", command=do_exit)
-    exit_btn.pack(side=tk.LEFT, padx=5)
+    # 确定按钮
+    ttk.Button(main_frame, text="确定", command=root.destroy).pack(pady=(20, 0))
     
     root.mainloop()
+
+
+def verify_license():
+    """验证授权，返回 (is_valid, error_msg, expiry_time)
     
-    if exit_flag[0]:
-        sys.exit(1)
+    新逻辑：
+    - 如果到期日期已过期，显示验证请求弹窗，返回 (False, 错误信息, 到期日期)
+    - 如果到期日期未过期，返回 (True, None, 过期时间)
+    """
+    print("[DEBUG] 开始授权验证...")
+    print(f"[DEBUG] 授权到期日期: {EXPIRY_DATE}")
+
+    # 检查是否过期
+    try:
+        expiry_time = datetime.strptime(EXPIRY_DATE, "%Y-%m-%d")
+    except ValueError:
+        print("[ERROR] 授权日期格式错误")
+        return False, "授权日期格式错误，请检查 EXPIRY_DATE 格式（应为 YYYY-MM-DD）", None
+
+    current_time = datetime.now()
+    today = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if today > expiry_time:
+        print("[WARNING] 授权已过期，显示验证请求...")
+        show_request_dialog(EXPIRY_DATE)
+        return False, f"授权已过期（到期日期: {EXPIRY_DATE}）", EXPIRY_DATE
+
+    print("[SUCCESS] 授权验证通过")
+    return True, None, EXPIRY_DATE  # 未过期
 
 
 def main():
@@ -5113,13 +4842,12 @@ def main():
     ensure_dirs()
     
     # 授权验证
-    is_valid, machine_code, error_msg, expiry_time = verify_license()
+    is_valid, error_msg, expiry_time = verify_license()
     print(f"[MAIN] 验证完成: is_valid={is_valid}")
     
     if not is_valid:
-        print("[MAIN] 授权验证失败，准备显示机器码弹窗...")
-        show_machine_code_dialog(None, machine_code, f"授权验证失败 - {error_msg}")
-        print("[MAIN] 弹窗已关闭，退出程序")
+        # 授权失败（已过期或无授权文件），弹窗已在 verify_license 中显示
+        print("[MAIN] 授权验证失败，退出程序")
         sys.exit(1)
     
     # 授权通过，打开软件
