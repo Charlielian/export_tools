@@ -14,6 +14,7 @@ import threading
 import os
 import sys
 import time
+import struct
 from datetime import datetime, timedelta
 import calendar
 import queue
@@ -135,6 +136,116 @@ import yaml
 # 到期日期（格式：YYYY-MM-DD）
 # 修改这里即可设置软件到期日期
 EXPIRY_DATE = "2026-06-30"
+
+# license.dat 文件位置（与脚本同目录）
+LICENSE_FILE = "license.dat"
+
+
+# ==================== 硬件信息获取（用于生成机器码） ====================
+import hashlib
+import platform
+import subprocess
+
+
+def get_macos_hw_info():
+    """获取macOS硬件信息"""
+    hw_info = {"cpu_id": "", "board_sn": "", "disk_sn": "", "mac": ""}
+    try:
+        cmd = ["ioreg", "-l", "-w0", "-r", "-c", "IOPlatformExpertDevice", "-d", "2"]
+        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8")
+        hw_info["board_sn"] = output.split('"IOPlatformSerialNumber" = ')[1].split('"')[1].strip()
+    except:
+        hw_info["board_sn"] = "unknown_board"
+    try:
+        cmd = ["sysctl", "-n", "machdep.cpu.brand_string"]
+        hw_info["cpu_id"] = subprocess.check_output(cmd).decode("utf-8").strip()
+    except:
+        hw_info["cpu_id"] = "unknown_cpu"
+    try:
+        cmd = ["diskutil", "info", "/"]
+        output = subprocess.check_output(cmd).decode("utf-8")
+        hw_info["disk_sn"] = output.split("Volume UUID:")[1].split("\n")[0].strip()
+    except:
+        hw_info["disk_sn"] = "unknown_disk"
+    try:
+        cmd = ["ifconfig", "en0"]
+        output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8")
+        hw_info["mac"] = output.split("ether")[1].split(" ")[1].strip().replace(":", "")
+    except:
+        hw_info["mac"] = "unknown_mac"
+    return hw_info
+
+
+def get_windows_hw_info():
+    """获取Windows硬件信息"""
+    try:
+        import wmi
+        c = wmi.WMI()
+        hw_info = {"cpu_id": "", "board_sn": "", "disk_sn": "", "mac": ""}
+        cpu_list = c.Win32_Processor()
+        hw_info["cpu_id"] = cpu_list[0].ProcessorId.strip() if (cpu_list and cpu_list[0].ProcessorId) else "unknown_cpu"
+        board_list = c.Win32_BaseBoard()
+        hw_info["board_sn"] = board_list[0].SerialNumber.strip() if (board_list and board_list[0].SerialNumber) else "unknown_board"
+        disk_list = c.Win32_DiskDrive()
+        hw_info["disk_sn"] = disk_list[0].SerialNumber.strip() if (disk_list and disk_list[0].SerialNumber) else "unknown_disk"
+        nic_list = c.Win32_NetworkAdapterConfiguration(IPEnabled=True)
+        hw_info["mac"] = nic_list[0].MACAddress.strip().replace(":", "") if (nic_list and nic_list[0].MACAddress) else "unknown_mac"
+        return hw_info
+    except:
+        return {"cpu_id": "unknown", "board_sn": "unknown", "disk_sn": "unknown", "mac": "unknown"}
+
+
+def get_linux_hw_info():
+    """获取Linux硬件信息"""
+    hw_info = {"cpu_id": "", "board_sn": "", "disk_sn": "", "mac": ""}
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f.readlines():
+                if "serial" in line.lower():
+                    hw_info["cpu_id"] = line.split(":")[1].strip()
+                    break
+        hw_info["cpu_id"] = hw_info["cpu_id"] if hw_info["cpu_id"] else "unknown_cpu"
+    except:
+        hw_info["cpu_id"] = "unknown_cpu"
+    try:
+        with open("/sys/devices/virtual/dmi/id/board_serial", "r") as f:
+            hw_info["board_sn"] = f.read().strip()
+    except:
+        hw_info["board_sn"] = "unknown_board"
+    try:
+        cmd = ["lsblk", "-o", "SERIAL", "-n", "/dev/sda"]
+        hw_info["disk_sn"] = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8").strip()
+    except:
+        hw_info["disk_sn"] = "unknown_disk"
+    try:
+        for path in ["/sys/class/net/eth0/address", "/sys/class/net/ens33/address"]:
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    hw_info["mac"] = f.read().strip().replace(":", "")
+                break
+        hw_info["mac"] = hw_info.get("mac", "unknown_mac")
+    except:
+        hw_info["mac"] = "unknown_mac"
+    return hw_info
+
+
+def get_hw_info():
+    """跨平台获取硬件信息"""
+    system = platform.system()
+    if system == "Windows":
+        return get_windows_hw_info()
+    elif system == "Darwin":
+        return get_macos_hw_info()
+    elif system == "Linux":
+        return get_linux_hw_info()
+    else:
+        return {"cpu_id": "unknown", "board_sn": "unknown", "disk_sn": "unknown", "mac": "unknown"}
+
+
+def generate_machine_code(hw_info):
+    """生成机器码（基于硬件信息）"""
+    raw_str = f"{hw_info['cpu_id']}-{hw_info['board_sn']}-{hw_info['disk_sn']}-{hw_info['mac']}"
+    return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
 
 # ==================== 配置文件加载 ====================
@@ -941,11 +1052,24 @@ class JXCXQuery:
         print(f"[DEBUG-COUNT] 查询参数 (前500字符): {payload_encoded[:500]}...")
 
         try:
-            res = self.sess.post(JXCX_COUNT_URL, data=payload_encoded, headers=HEADERS, timeout=30)
+            res = self.sess.post(JXCX_COUNT_URL, data=payload_encoded, headers=HEADERS, timeout=180)
             print(f"[DEBUG-COUNT] 响应状态码: {res.status_code}")
 
             if res.status_code == 200:
-                result = json.loads(res.content)
+                # 检查响应内容是否为空或无效
+                if not res.content or len(res.content.strip()) == 0:
+                    print(f"[ERROR-COUNT] 响应内容为空，可能是Session过期")
+                    self.enabled = False  # 标记Session可能已过期
+                    return 0
+
+                try:
+                    result = json.loads(res.content)
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR-COUNT] JSON解析失败: {e}")
+                    print(f"[ERROR-COUNT] 响应内容 (前500字符): {res.text[:500]}")
+                    self.enabled = False  # 标记Session可能已过期
+                    return 0
+
                 print(f"[DEBUG-COUNT] 响应内容: {result}")
 
                 # 检查是否有错误消息
@@ -964,13 +1088,240 @@ class JXCXQuery:
             import traceback
             traceback.print_exc()
             pass
-        return 1000000
+        # 超时时返回MAX_SINGLE_QUERY
+        print(f"[WARNING-COUNT] 查询超时，返回MAX_SINGLE_QUERY({MAX_SINGLE_QUERY})")
+        return MAX_SINGLE_QUERY
 
     
-    def get_table(self, payload, to_df=True):
-        """获取查询数据（支持分批查询）"""
+    def get_4g_voice_table(self, volte_payload, epsfb_payload, to_df=True):
+        """获取4G语音小区报表数据（VoLTE+EPSFB联合，需分别查询后合并）
+
+        Args:
+            volte_payload: VoLTE表的payload
+            epsfb_payload: EPSFB表的payload
+            to_df: 是否返回DataFrame
+
+        Returns:
+            DataFrame或dict: 合并后的数据（向后兼容）
+        """
+        result = self._get_4g_voice_table_internal(volte_payload, epsfb_payload)
+        if to_df:
+            return result['merged']
+        else:
+            return {'data': result['merged'].to_dict('records')}
+
+    def _get_4g_voice_table_internal(self, volte_payload, epsfb_payload):
+        """获取4G语音小区报表数据（内部方法，返回原始数据和合并数据）
+
+        Args:
+            volte_payload: VoLTE表的payload
+            epsfb_payload: EPSFB表的payload
+
+        Returns:
+            dict: {'volte': DataFrame, 'epsfb': DataFrame, 'merged': DataFrame}
+        """
+        result = {'volte': pd.DataFrame(), 'epsfb': pd.DataFrame(), 'merged': pd.DataFrame()}
+
+        if not self.enabled:
+            print("[DEBUG-4G-VOICE] JXCX 未启用，尝试进入...")
+            if not self.enter_jxcx():
+                print("[ERROR-4G-VOICE] 无法进入即席查询模块")
+                return result
+
+        print(f"[DEBUG-4G-VOICE] ========== 开始获取4G语音小区数据 ==========")
+
+        # 1. 获取VoLTE数据
+        print("[DEBUG-4G-VOICE] 正在获取VoLTE数据...")
+        volte_df = self.get_table(volte_payload, to_df=True)
+        print(f"[DEBUG-4G-VOICE] VoLTE数据: {len(volte_df)} 行")
+
+        # 打印VoLTE列名
+        print(f"[DEBUG-4G-VOICE] VoLTE列名: {list(volte_df.columns) if not volte_df.empty else 'N/A'}")
+
+        result['volte'] = volte_df
+
+        # 2. 获取EPSFB数据
+        print("[DEBUG-4G-VOICE] 正在获取EPSFB数据...")
+        epsfb_df = self.get_table(epsfb_payload, to_df=True)
+        print(f"[DEBUG-4G-VOICE] EPSFB数据: {len(epsfb_df)} 行")
+
+        # 打印EPSFB列名
+        print(f"[DEBUG-4G-VOICE] EPSFB列名: {list(epsfb_df.columns) if not epsfb_df.empty else 'N/A'}")
+
+        result['epsfb'] = epsfb_df
+
+        if volte_df.empty and epsfb_df.empty:
+            print("[WARNING-4G-VOICE] VoLTE和EPSFB数据均为空")
+            return result
+
+        # 3. 统一列名 - API返回的是英文列名(starttime, cgi)，转换为中文便于合并
+        # 列名映射：英文 -> 中文
+        col_name_map = {
+            'starttime': '时间', 'city': '地市', 'cgi': '小区', 'grid': '责任网格',
+            'area': '区县', 'nrcell_name': '小区名称'
+        }
+
+        # VoLTE列名转换
+        volte_rename = {}
+        for en_col in volte_df.columns:
+            if en_col in col_name_map:
+                volte_rename[en_col] = col_name_map[en_col]
+        volte_df = volte_df.rename(columns=volte_rename)
+
+        # EPSFB列名转换
+        epsfb_rename = {}
+        for en_col in epsfb_df.columns:
+            if en_col in col_name_map:
+                epsfb_rename[en_col] = col_name_map[en_col]
+        epsfb_df = epsfb_df.rename(columns=epsfb_rename)
+
+        print(f"[DEBUG-4G-VOICE] VoLTE转换后列名: {list(volte_df.columns)}")
+        print(f"[DEBUG-4G-VOICE] EPSFB转换后列名: {list(epsfb_df.columns)}")
+
+        # 4. 确定合并键
+        merge_keys = []
+        for key in ['时间', '小区']:
+            if key in volte_df.columns:
+                merge_keys.append(key)
+
+        print(f"[DEBUG-4G-VOICE] 合并键: {merge_keys}")
+
+        if not merge_keys:
+            print("[WARNING-4G-VOICE] 无法确定合并键，使用简单concat")
+            merged_df = pd.concat([volte_df, epsfb_df], ignore_index=True)
+            result['merged'] = merged_df
+            return result
+
+        # 5. 确定VoLTE和EPSFB各自的特有字段
+        common_cols = set(['时间', '小区', '地市', '责任网格', '区县', '小区名称', 'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name'])
+
+        # VoLTE特有字段（英文 volta_ 或中文 VoLTE 开头，但排除公共字段）
+        volte_cols = [c for c in volte_df.columns if (c.startswith('volte_') or 'VoLTE' in c) and c not in common_cols]
+        # EPSFB特有字段（英文 epsfb_ 或中文 EPSFB 开头，但排除公共字段）
+        epsfb_cols = [c for c in epsfb_df.columns if (c.startswith('epsfb_') or 'EPSFB' in c) and c not in common_cols]
+
+        print(f"[DEBUG-4G-VOICE] VoLTE特有字段: {volte_cols}")
+        print(f"[DEBUG-4G-VOICE] EPSFB特有字段: {epsfb_cols}")
+
+        # 6. 准备合并数据
+        # VoLTE: 合并键 + VoLTE特有字段
+        volte_merge_cols = [c for c in merge_keys if c in volte_df.columns] + [c for c in volte_cols if c in volte_df.columns]
+        volte_for_merge = volte_df[volte_merge_cols].copy()
+
+        # EPSFB: 合并键 + EPSFB特有字段
+        epsfb_merge_cols = [c for c in merge_keys if c in epsfb_df.columns] + [c for c in epsfb_cols if c in epsfb_df.columns]
+        epsfb_for_merge = epsfb_df[epsfb_merge_cols].copy()
+
+        # 7. 执行合并（outer join，保留两边的数据）
+        if not merge_keys:
+            merged_df = pd.concat([volte_for_merge, epsfb_for_merge], axis=1)
+        else:
+            merged_df = pd.merge(volte_for_merge, epsfb_for_merge, on=merge_keys, how='outer')
+
+        # 清理可能的空列
+        merged_df = merged_df.dropna(axis=1, how='all')
+
+        print(f"[SUCCESS-4G-VOICE] 合并完成，最终数据: {len(merged_df)} 行, {len(merged_df.columns)} 列")
+        print(f"[DEBUG-4G-VOICE] 合并后列名: {list(merged_df.columns)}")
+
+        result['merged'] = merged_df
+        return result
+
+    def _extract_cities(self, payload):
+        """从payload中提取地市列表"""
+        cities = []
+        if 'where' in payload:
+            for condition in payload['where']:
+                if condition.get('feild', '').lower() == 'city':
+                    val = condition.get('val', '')
+                    # 支持逗号分隔的多地市，如 "广州,深圳,东莞"
+                    cities = [c.strip() for c in str(val).split(',') if c.strip()]
+                    break
+        return cities
+
+    def _set_single_city(self, payload, city):
+        """设置payload为单个地市"""
+        if 'where' in payload:
+            for condition in payload['where']:
+                if condition.get('feild', '').lower() == 'city':
+                    condition['val'] = city
+                    break
+        return payload
+
+    def _fetch_by_loop(self, payload, total_count):
+        """循环获取数据，每批5000条，超过100万行才用分批策略"""
         import copy
-        
+        MAX_ROWS = 1000000
+        if total_count <= MAX_ROWS:
+            # 循环获取
+            data_list = []
+            start = 0
+            page_size = 5000
+            retry_count = 0
+            max_retries = 3
+
+            while start < total_count:
+                # 检查 session 是否还有效
+                castgc = self.sess.cookies.get('CASTGC', domain='nqi.gmcc.net')
+                if not castgc:
+                    castgc = self.sess.cookies.get('CASTGC')
+
+                if not castgc and retry_count < max_retries:
+                    retry_count += 1
+                    print(f"[WARNING-TABLE] Session可能已失效，尝试重新进入即席查询 (重试 {retry_count}/{max_retries})...")
+                    if self.enter_jxcx(retry_times=2, timeout=60):
+                        print("[SUCCESS-TABLE] 重新进入即席查询成功！")
+                        continue
+                    else:
+                        print("[ERROR-TABLE] 重新进入即席查询失败")
+                        break
+
+                p = copy.deepcopy(payload)
+                p['start'] = start
+                p['length'] = page_size
+                print(f"[DEBUG-TABLE] 查询: start={start}, length={page_size}")
+                batch = self._fetch_data(p)
+
+                if not batch:
+                    # 如果返回空数据且session可能失效，尝试重连
+                    castgc = self.sess.cookies.get('CASTGC', domain='nqi.gmcc.net')
+                    if not castgc:
+                        castgc = self.sess.cookies.get('CASTGC')
+
+                    if not castgc and retry_count < max_retries:
+                        retry_count += 1
+                        print(f"[WARNING-TABLE] 空数据+Session失效，尝试重新进入即席查询 (重试 {retry_count}/{max_retries})...")
+                        if self.enter_jxcx(retry_times=2, timeout=60):
+                            print("[SUCCESS-TABLE] 重新进入即席查询成功！")
+                            continue
+                        else:
+                            print("[ERROR-TABLE] 重新进入即席查询失败")
+                            break
+
+                    print(f"[WARNING-TABLE] start={start} 返回空数据，停止查询")
+                    break
+
+                data_list.extend(batch)
+                print(f"[DEBUG-TABLE] 已获取 {len(data_list)}/{total_count} 条")
+
+                if len(batch) < page_size:
+                    print(f"[DEBUG-TABLE] 返回数据少于请求数量，已到最后一页")
+                    break
+
+                start += page_size
+                if start >= total_count:
+                    break
+
+            return data_list
+        else:
+            # 超过100万行：使用分批查询策略
+            print(f"[DEBUG-TABLE] 数据量 {total_count} > {MAX_ROWS}，使用分批查询策略")
+            return self._fetch_data_batch(payload, total_count)
+
+    def get_table(self, payload, to_df=True):
+        """获取查询数据（100万行以内直接循环获取，超过100万行才分批）"""
+        import copy
+
         if not self.enabled:
             print("[DEBUG-TABLE] JXCX 未启用，尝试进入...")
             if not self.enter_jxcx():
@@ -995,34 +1346,39 @@ class JXCXQuery:
             castgc = self.sess.cookies.get('CASTGC')
         print(f"[DEBUG-TABLE] CASTGC cookie 状态: {'有效' if castgc else '无效或过期'}")
 
-        # 先获取总数
-        print(f"[DEBUG-TABLE] 调用 get_table_count 获取数据总数...")
-        total_count = self.get_table_count(copy.deepcopy(payload))
-        print(f"[DEBUG-TABLE] 返回的总数: {total_count}")
-
-        # 执行第一批查询或分批查询
-        if total_count > MAX_SINGLE_QUERY:
-            # 大数据量：使用分批查询策略获取全部数据
-            print(f"[DEBUG-TABLE] 数据量{total_count}>MAX_SINGLE_QUERY({MAX_SINGLE_QUERY})，使用分批查询策略")
-            data_list = self._fetch_data_batch(payload, total_count)
-        else:
-            # 小数据量或数据总数<=100000，直接查询
-            if total_count == 0:
-                print(f"[WARNING-TABLE] 数据总数为0，尝试直接查询不限制条数...")
-                payload['length'] = 5000
-                payload['start'] = 0
-            else:
-                payload['length'] = total_count
-                payload['start'] = 0
-                print(f"[DEBUG-TABLE] 数据量{total_count}<=MAX_SINGLE_QUERY({MAX_SINGLE_QUERY})，直接查询")
-            
-            data_list = self._fetch_data(payload)
-            
-            # 如果直接查询返回空数据但总数>0，尝试分批查询
-            if not data_list and total_count > 0:
-                print(f"[WARNING-TABLE] 直接查询返回空数据，尝试分批查询策略...")
-                data_list = self._fetch_data_batch(payload, total_count)
+        # 如果 session 失效，尝试重新进入即席查询
+        if not castgc:
+            print("[WARNING-TABLE] Session 可能已过期，尝试重新进入即席查询...")
+            if not self.enter_jxcx(retry_times=2, timeout=60):
+                print("[ERROR-TABLE] 重新进入即席查询失败，请尝试重新登录")
+                return pd.DataFrame() if to_df else {}
         
+        # 提取地市列表（用于判断是否需要分地市提取）
+        city_list = self._extract_cities(payload)
+        multiple_cities = len(city_list) > 1
+        print(f"[DEBUG-TABLE] 检测到地市: {city_list} (共{len(city_list)}个，{'多地市' if multiple_cities else '单地市'})")
+
+        # 多地市：分地市提取再合并
+        if multiple_cities:
+            print(f"[DEBUG-TABLE] 多地市模式：分地市提取再合并")
+            all_data = []
+            for city in city_list:
+                print(f"[DEBUG-TABLE] ===== 开始提取地市: {city} =====")
+                city_payload = self._set_single_city(copy.deepcopy(payload), city)
+                city_count = self.get_table_count(copy.deepcopy(city_payload))
+                print(f"[DEBUG-TABLE] {city} 数据量: {city_count}")
+
+                city_data = self._fetch_by_loop(city_payload, city_count)
+                all_data.extend(city_data)
+                print(f"[DEBUG-TABLE] {city} 提取完成，已获取 {len(city_data)} 条")
+
+            data_list = all_data
+        else:
+            # 单地市或无地市条件：直接获取
+            total_count = self.get_table_count(copy.deepcopy(payload))
+            print(f"[DEBUG-TABLE] 调用 get_table_count 获取数据总数: {total_count}")
+            data_list = self._fetch_by_loop(payload, total_count)
+
         if to_df:
             en_zh_df = self._get_field_mapping(payload)
             res_df = pd.DataFrame(data_list)
@@ -1043,25 +1399,42 @@ class JXCXQuery:
         else:
             return {'data': data_list}
 
-    def _fetch_data(self, payload):
+    def _fetch_data(self, payload, timeout=None):
         """发送请求获取数据"""
+        if timeout is None:
+            timeout = getattr(self, '_current_batch_timeout', 300)
+            
         payload_encoded = self._encode_payload(payload)
         print(f"[DEBUG-TABLE] 编码后的参数 (前800字符): {payload_encoded[:800]}...")
         print(f"[DEBUG-TABLE] start={payload.get('start', 0)}, length={payload.get('length', 'N/A')}")
 
         try:
-            print(f"[DEBUG-TABLE] 开始发送请求 (timeout=120s)...")
+            print(f"[DEBUG-TABLE] 开始发送请求 (timeout={timeout}s)...")
             start_request_time = time.time()
-            res = self.sess.post(JXCX_URL, data=payload_encoded, headers=HEADERS, timeout=120)
+            res = self.sess.post(JXCX_URL, data=payload_encoded, headers=HEADERS, timeout=timeout)
             elapsed = time.time() - start_request_time
             print(f"[DEBUG-TABLE] 请求完成，耗时: {elapsed:.2f}秒，状态码: {res.status_code}")
 
             if res.status_code != 200:
                 print(f"[ERROR-TABLE] 请求失败，状态码: {res.status_code}")
                 print(f"[ERROR-TABLE] 响应内容: {res.text[:500]}")
+                self.enabled = False  # 标记Session可能已过期
                 return []
 
-            result = json.loads(res.content)
+            # 检查响应内容是否为空
+            if not res.content or len(res.content.strip()) == 0:
+                print(f"[ERROR-TABLE] 响应内容为空，可能是Session过期或服务器错误")
+                self.enabled = False
+                return []
+
+            try:
+                result = json.loads(res.content)
+            except json.JSONDecodeError as e:
+                print(f"[ERROR-TABLE] JSON解析失败: {e}")
+                print(f"[ERROR-TABLE] 响应内容 (前500字符): {res.text[:500]}")
+                self.enabled = False  # 标记Session可能已过期
+                return []
+
             print(f"[DEBUG-TABLE] 响应JSON keys: {result.keys()}")
 
             # 打印 recordsFiltered 和 recordsTotal（DataTables 分页信息）
@@ -1103,8 +1476,20 @@ class JXCXQuery:
         
         # 尝试确定服务器支持的批次大小
         BATCH_SIZES = [50000, 10000, 5000, 2000, 1000, 500, 200]  # 从大到小尝试
-        BATCH_SIZE = BATCH_SIZES[0]
         
+        # 不同批次大小对应的超时时间（秒）
+        BATCH_TIMEOUTS = {
+            50000: 300,
+            10000: 180,
+            5000: 120,
+            2000: 90,
+            1000: 60,
+            500: 45,
+            200: 30
+        }
+        
+        # 存储测试时的超时设置
+        self._current_batch_timeout = 300
         all_data = []
         start = 0
         
@@ -1112,13 +1497,17 @@ class JXCXQuery:
         
         # 先测试服务器支持的批次大小
         for test_size in BATCH_SIZES:
+            test_timeout = BATCH_TIMEOUTS.get(test_size, 300)
+            self._current_batch_timeout = test_timeout
             test_payload = copy.deepcopy(original_payload)
             test_payload['start'] = 0
             test_payload['length'] = test_size
+            print(f"[DEBUG-BATCH] 测试批次大小 {test_size} (timeout={test_timeout}s)...")
             test_data = self._fetch_data(test_payload)
             
             if test_data:
                 BATCH_SIZE = test_size
+                self._current_batch_timeout = BATCH_TIMEOUTS.get(BATCH_SIZE, 300)
                 all_data.extend(test_data)
                 start = test_size
                 print(f"[DEBUG-BATCH] 服务器支持批次大小: {BATCH_SIZE}，已获取 {len(all_data)} 条数据")
@@ -1924,172 +2313,6 @@ def get_important_scene_payload():
     return payload
 
 
-def get_5g_cfg_payload():
-    """获取5G小区工参报表payload"""
-    print("[DEBUG-PAYLOAD] 生成 5G小区工参报表 payload")
-    payload = {
-        'draw': 1, 'start': 0, 'length': 200, 'total': 0,
-        'geographicdimension': '小区，网格，地市，分公司', 'timedimension': '天粒度',
-        'enodebField': 'gnodeb_id', 'cgiField': 'ncgi',
-        'timeField': 'starttime', 'cellField': 'nrcell_name', 'cityField': 'city',
-        'result': {'result': [
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '小区NCGI', 'feild': 'ncgi', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'CGI', 'feild': 'cgi', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '小区名称', 'feild': 'nrcell_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '纬度', 'feild': 'latitude', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '经度', 'feild': 'longitude', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属地市', 'feild': 'city', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属区县', 'feild': 'area', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '责任网格', 'feild': 'grid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '人力区县分公司', 'feild': 'branch', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '厂家', 'feild': 'vendor', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '网元状态', 'feild': 'state', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '覆盖类型', 'feild': 'cover_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '使用频段', 'feild': 'frequency_band', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '详细使用频段', 'feild': 'frequency_band_detail', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属基站id', 'feild': 'gnodeb_id', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属基站名称', 'feild': 'gnodeb_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'TAC', 'feild': 'tac', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'PCI', 'feild': 'pci', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '方位角', 'feild': 'azimuth', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '电下倾角', 'feild': 'tilt', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '挂高', 'feild': 'height', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '设备维护单位', 'feild': 'maintain_department', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '入网时间', 'feild': 'setup_time', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '一级标签', 'feild': 'cover_scene1', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '二级标签', 'feild': 'cover_scene2', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '三级标签', 'feild': 'cover_scene3', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '四级标签', 'feild': 'cover_scene4', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 网络/频段配置
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '网络制式', 'feild': 'network_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '关联频段', 'feild': 'aau_freq', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '小区宽带', 'feild': 'bschannelbwdl', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 天线配置
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线名称', 'feild': 'ant_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线类型', 'feild': 'ant_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '机械下倾角', 'feild': 'elcontroldecline', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 站点/机房信息
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '机房名称', 'feild': 'room_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属局站', 'feild': 'station_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '省内机房产品类型', 'feild': 'custowerroom_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '站点类型', 'feild': 'site_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '是否拉远', 'feild': 'is_remote', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '共享类型', 'feild': 'sharing_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 网格/地理信息
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '微网格标识', 'feild': 'micro_grid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '乡镇街道', 'feild': 'town', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '路测网格', 'feild': 'grid_road', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '市场部网格责任田', 'feild': 'marketduty', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '市场部综合网格', 'feild': 'marketgrid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 其他配置
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'VIP级别', 'feild': 'vip_level', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属规划ID', 'feild': 'plan_id', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'OMC中小区名称', 'feild': 'omc_nrcell_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 资源ID
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属基站资源ID', 'feild': 'gnodeb_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '小区资源ID', 'feild': 'nrcell_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属机房资源ID', 'feild': 'room_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属局站ID', 'feild': 'station_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 时间戳
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '记录有效时间', 'feild': 'eff_from_date', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '5G小区工参', 'table': 'appdbv3.a_common_cfg_nr_cellant_d', 'tableName': '5G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '记录失效时间', 'feild': 'eff_to_date', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-        ], 'tableParams': {'supporteddimension': None, 'supportedtimedimension': ''}, 'columnname': ''},
-        'where': [
-            {'datatype': 'character', 'feild': 'curr_flag', 'feildName': '', 'symbol': '=', 'val': '1', 'whereCon': 'and', 'query': True},
-            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True},
-        ],
-        'indexcount': 0
-    }
-    return payload
-
-
-def get_4g_cfg_payload():
-    """获取4G小区工参报表payload"""
-    print("[DEBUG-PAYLOAD] 生成 4G小区工参报表 payload")
-    payload = {
-        'draw': 1, 'start': 0, 'length': 200, 'total': 0,
-        'geographicdimension': '小区，网格，地市，分公司', 'timedimension': '天粒度',
-        'enodebField': 'enodeb_id', 'cgiField': 'cgi',
-        'timeField': 'starttime', 'cellField': 'cell', 'cityField': 'city',
-        'result': {'result': [
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'CGI', 'feild': 'cgi', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '小区名称', 'feild': 'cell_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '纬度', 'feild': 'latitude', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '经度', 'feild': 'longitude', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属地市', 'feild': 'city', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属区县', 'feild': 'area', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '网格', 'feild': 'grid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '人力区县分公司', 'feild': 'branch', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '厂家', 'feild': 'vendor', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '网元状态', 'feild': 'state', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '覆盖类型', 'feild': 'cover_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '使用频段', 'feild': 'frequency_band', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属基站id', 'feild': 'enodeb_id', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属基站名称', 'feild': 'enodeb_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '物理小区识别码', 'feild': 'ltecell_pci', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '跟踪区码TAC', 'feild': 'tac', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '方位角', 'feild': 'azimuth', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '电下倾角', 'feild': 'tilt', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '挂高', 'feild': 'height', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '设备维护单位', 'feild': 'maintain_department', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '入网时间', 'feild': 'usetime', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '一级标签', 'feild': 'cover_scene1', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '二级标签', 'feild': 'cover_scene2', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '三级标签', 'feild': 'cover_scene3', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '四级标签', 'feild': 'cover_scene4', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 网络/频段配置
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '网络制式', 'feild': 'network_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '小区下行带宽', 'feild': 'bandwidthdl', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '中心载频的信道号', 'feild': 'ltecell_earfcn', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '上行中心载频的信道号', 'feild': 'earfcnul', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '下行中心载频的信道号', 'feild': 'earfcndl', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '功率', 'feild': 'referencesignalpower', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 天线配置
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线名称', 'feild': 'ant_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线类型', 'feild': 'ant_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '机械下倾角', 'feild': 'elcontroldecline', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '型号', 'feild': 'model', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线入网时间', 'feild': 'ant_usetime', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线厂家', 'feild': 'ant_vendor', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '天线ID', 'feild': 'ant_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 站点/机房信息
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属机房', 'feild': 'room_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属站点名称', 'feild': 'station_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '省内机房产品类型', 'feild': 'custowerroom_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '站点类型', 'feild': 'site_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '是否拉远', 'feild': 'is_remote', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '是否小站', 'feild': 'is_nc_cell', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '共享类型', 'feild': 'sharing_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '铁塔类型', 'feild': 'tower_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '区域类型', 'feild': 'region_type', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '站点新增工单流水号', 'feild': 'newsite_sn', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 网格/地理信息
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '乡镇街道', 'feild': 'town', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '路测网格', 'feild': 'grid_road', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '市场网格责任田', 'feild': 'marketduty', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '市场网格ID', 'feild': 'marketgrid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 状态/维护
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '状态', 'feild': 'status', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '维护级别', 'feild': 'maintain_level', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - OMC信息
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'OMC中小区名称', 'feild': 'omc_cellname', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': 'OMC中基站名称', 'feild': 'omc_site_name', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 规划/资源ID
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '所属规划ID', 'feild': 'plan_id', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '机房Cuid', 'feild': 'room_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '站点ID', 'feild': 'station_cuid', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            # 新增字段 - 时间戳
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '记录开始时间', 'feild': 'eff_from_date', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-            {'feildtype': '4G小区工参', 'table': 'appdbv3.v_a_common_cfg_lte_cellant_d', 'tableName': '4G小区工参', 'datatype': 'character varying', 'columntype': 1, 'feildName': '记录结束时间', 'feild': 'eff_to_date', 'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'},
-        ], 'tableParams': {'supporteddimension': None, 'supportedtimedimension': ''}, 'columnname': ''},
-        'where': [
-            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True},
-        ],
-        'indexcount': 0
-    }
-    return payload
-
-
 def _build_columns_param(field_list):
     """构建DataTables格式的columns参数"""
     columns = []
@@ -2827,6 +3050,711 @@ def get_vonr_warning_payload():
     return payload
 
 
+def get_4g_wanchenglv_payload():
+    """获取4G全程完好率报表payload"""
+    print("[DEBUG-PAYLOAD] 生成 4G全程完好率报表 payload")
+    
+    # 4G全程完好率报表字段（基于HAR分析：appdbv3.a_common_pm_lte）
+    fields = [
+        'starttime', 'cgi', 'cell_name', 'city', 'branch', 'network_type', 'state', 'cover_type',
+        'succconnestab', 'attconnestab', 'nbrsuccestab', 'nbrattestab',
+        'succexecinc', 'ho_succ_out', 'ho_att__out',
+        'hofail', 'nbrreqrelenb_normal', 'nbrreqrelenb', 'nbrleft', 'nbrhoinc'
+    ]
+    
+    # 字段中文名映射
+    field_names = {
+        'starttime': '开始时间', 'cgi': 'CGI', 'cell_name': '小区名称', 'city': '所属地市',
+        'branch': '人力区县分公司', 'network_type': '网络制式', 'state': '网元状态', 'cover_type': '覆盖类型',
+        'succconnestab': 'RRC连接建立成功次数', 'attconnestab': 'RRC连接建立请求次数',
+        'nbrsuccestab': 'E-RAB建立成功数', 'nbrattestab': 'E-RAB建立请求数',
+        'succexecinc': '切换入成功次数', 'ho_succ_out': '切换成功次数', 'ho_att__out': '切换请求次数',
+        'hofail': '切出失败的E-RAB数', 'nbrreqrelenb_normal': '正常的eNB请求释放的E-RAB数',
+        'nbrreqrelenb': 'eNB请求释放的E-RAB数', 'nbrleft': '遗留上下文个数', 'nbrhoinc': '切换入E-RAB数'
+    }
+    
+    # 构建result字段
+    result_list = []
+    # 时间维度字段需要 columntype=2，其他字段 columntype=1
+    time_fields = {'starttime'}
+    fixed_datatype_fields = {'starttime', 'city', 'cgi', 'branch', 'network_type', 'state', 'cover_type'}
+    for f in fields:
+        field_datatype = '1' if f in fixed_datatype_fields else 'character varying'
+        # starttime 使用 columntype=2（时间维度）
+        columntype = 2 if f in time_fields else 1
+        result_list.append({
+            'feildtype': '公共信息（小区级粒度）',
+            'table': 'appdbv3.a_common_pm_lte',
+            'tableName': '4G小区性能KPI报表',
+            'datatype': field_datatype,
+            'columntype': columntype,
+            'feildName': field_names.get(f, f),
+            'feild': f,
+            'poly': '无',
+            'anyWay': '无',
+            'chart': '无',
+            'chartpoly': '无'
+        })
+    
+    payload = {
+        'draw': 1,
+        'start': 0,
+        'length': 200,
+        'total': 0,
+        'geographicdimension': '小区，网格，地市，分公司',
+        'timedimension': '小时,天,周.月,忙时,15分钟',
+        'enodebField': 'enodeb_id',
+        'cgiField': 'cgi',
+        'timeField': 'starttime',
+        'cellField': 'cell',
+        'cityField': 'city',
+        'columns': _build_columns_param(fields),
+        'order': [{'column': 0, 'dir': 'desc'}],
+        'search': {'value': '', 'regex': False},
+        'result': {'result': result_list, 'tableParams': {'supporteddimension': '0', 'supportedtimedimension': '1'}, 'columnname': ''},
+        'where': [
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '>=', 'val': '2026-04-19 00:00:00', 'whereCon': 'and', 'query': True},
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '<', 'val': '2026-04-19 23:59:59', 'whereCon': 'and', 'query': True},
+            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True}
+        ],
+        'indexcount': 0
+    }
+    print(f"[DEBUG-PAYLOAD] 4G全程完好率报表 payload 生成完成，表名: appdbv3.a_common_pm_lte")
+    return payload
+
+
+def get_5g_wanchenglv_payload():
+    """获取5G全程完好率报表payload"""
+    print("[DEBUG-PAYLOAD] 生成 5G全程完好率报表 payload")
+    
+    # 5G全程完好率报表字段（基于HAR分析：appdbv3.a_common_pm_sacu）
+    fields = [
+        'starttime', 'ncgi', 'nrcell_name', 'branch', 'grid', 'grid_road', 'city', 'area',
+        'vendor', 'network_type', 'cover_type', 'state',
+        'rrc_succconnestab', 'rrc_attconnestab',
+        'flow_nbrsuccestab', 'flow_nbrattestab',
+        'ngsig_connestabsucc', 'ngsig_connestabatt',
+        'context_attrelgnb', 'context_attrelgnb_normal',
+        'context_succinitalsetup', 'context_nbrleft',
+        'ho_succexecinc', 'rrc_succconnreestab_nonsrccell',
+        'ho_succoutintercung', 'ho_succoutintercuxn',
+        'ho_succoutintracuinterdu', 'ho_succoutintradu',
+        'ho_attoutintercung', 'ho_attoutintercuxn',
+        'ho_attoutintracuinterdu', 'ho_attoutcuintradu'
+    ]
+    
+    # 字段中文名映射
+    field_names = {
+        'starttime': '数据时间', 'ncgi': 'NCGI', 'nrcell_name': '小区名称',
+        'branch': '人力区县分公司', 'grid': '责任网格', 'grid_road': '路测网格',
+        'city': '所属地市', 'area': '所属区县', 'vendor': '设备厂家',
+        'network_type': '网络制式', 'cover_type': '覆盖类型', 'state': '网元状态',
+        'rrc_succconnestab': 'RRC连接建立成功次数', 'rrc_attconnestab': 'RRC连接建立请求次数',
+        'flow_nbrsuccestab': 'Flow建立成功数', 'flow_nbrattestab': 'Flow建立请求数',
+        'ngsig_connestabsucc': 'NG接口UE相关逻辑信令连接建立成功次数',
+        'ngsig_connestabatt': 'NG接口UE相关逻辑信令连接建立请求次数',
+        'context_attrelgnb': 'gNB请求释放上下文数', 'context_attrelgnb_normal': '正常的gNB请求释放上下文数',
+        'context_succinitalsetup': '初始上下文建立成功次数', 'context_nbrleft': '遗留上下文个数',
+        'ho_succexecinc': '切换入成功次数', 'rrc_succconnreestab_nonsrccell': 'RRC连接重建成功次数(非源侧小区)',
+        'ho_succoutintercung': 'gNB间NG切换出成功次数', 'ho_succoutintercuxn': 'gNB间Xn切换出成功次数',
+        'ho_succoutintracuinterdu': 'CU内DU间切换出执行成功次数', 'ho_succoutintradu': 'CU内DU内切换出成功次数',
+        'ho_attoutintercung': 'gNB间NG切换出准备请求次数', 'ho_attoutintercuxn': 'gNB间Xn切换出准备请求次数',
+        'ho_attoutintracuinterdu': 'CU内DU间切换出执行请求次数', 'ho_attoutcuintradu': 'CU内DU内切换出执行请求次数'
+    }
+    
+    # 构建result字段
+    result_list = []
+    # 时间维度字段需要 columntype=2，其他字段 columntype=1
+    time_fields = {'starttime'}
+    fixed_datatype_fields = {'starttime', 'city', 'ncgi', 'nrcell_name', 'branch', 'grid', 'grid_road', 'area', 'vendor', 'network_type', 'cover_type', 'state'}
+    for f in fields:
+        field_datatype = '1' if f in fixed_datatype_fields else 'character varying'
+        # starttime 使用 columntype=2（时间维度）
+        columntype = 2 if f in time_fields else 1
+        result_list.append({
+            'feildtype': 'SA_CU性能',  # 修正：使用与HAR一致的feildtype
+            'table': 'appdbv3.a_common_pm_sacu',
+            'tableName': '5GSA_CU性能报表',  # 修正：使用与HAR一致的tableName
+            'datatype': field_datatype,
+            'columntype': columntype,
+            'feildName': field_names.get(f, f),
+            'feild': f,
+            'poly': '无',
+            'anyWay': '无',
+            'chart': '无',
+            'chartpoly': '无'
+        })
+    
+    payload = {
+        'draw': 1,
+        'start': 0,
+        'length': 200,
+        'total': 0,
+        'geographicdimension': '小区，网格，地市，分公司',
+        'timedimension': '小时,天,周,月',
+        'enodebField': 'gnodeb_id',
+        'cgiField': 'ncgi',
+        'timeField': 'starttime',
+        'cellField': 'nrcell',
+        'cityField': 'city',
+        'columns': _build_columns_param(fields),
+        'order': [{'column': 0, 'dir': 'desc'}],
+        'search': {'value': '', 'regex': False},
+        'result': {'result': result_list, 'tableParams': {'supporteddimension': '0', 'supportedtimedimension': '1'}, 'columnname': ''},
+        'where': [
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '>=', 'val': '2026-04-19 00:00:00', 'whereCon': 'and', 'query': True},
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '<', 'val': '2026-04-19 23:59:59', 'whereCon': 'and', 'query': True},
+            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True}
+        ],
+        'indexcount': 0
+    }
+    print(f"[DEBUG-PAYLOAD] 5G全程完好率报表 payload 生成完成，表名: appdbv3.a_common_pm_sacu")
+    return payload
+
+
+def get_volte_payload():
+    """获取VoLTE小区监控预警报表payload"""
+    print("[DEBUG-PAYLOAD] 生成 VoLTE小区监控预警 payload")
+    
+    # VoLTE字段（基于HAR日志中的实际字段）
+    fields = [
+        'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name',
+        'volte_ul_tunzi_len', 'volte_ul_dantong_len', 'volte_ul_duanxu_len', 'volte_ul_voice_sum_len',
+        'volte_ans_voice_call', 'volte_dl_tunzi_len', 'volte_dl_dantong_len', 'volte_dl_duanxu_len', 'volte_dl_voice_sum_len'
+    ]
+    
+    # 字段中文名映射
+    field_names = {
+        'starttime': '时间', 'city': '地市', 'cgi': '小区', 'grid': '责任网格', 'area': '区县', 'nrcell_name': '小区名称',
+        'volte_ul_tunzi_len': 'VoLTE语音上行吞字时长(s)', 'volte_ul_dantong_len': 'VoLTE语音上行单通时长(s)',
+        'volte_ul_duanxu_len': 'VoLTE语音上行断续时长(s)', 'volte_ul_voice_sum_len': 'VoLTE语音上行总时长(s)',
+        'volte_ans_voice_call': 'VoLTE语音通话总次数',
+        'volte_dl_tunzi_len': 'VoLTE语音下行吞字时长(s)', 'volte_dl_dantong_len': 'VoLTE语音下行单通时长(s)',
+        'volte_dl_duanxu_len': 'VoLTE语音下行断续时长(s)', 'volte_dl_voice_sum_len': 'VoLTE语音下行总时长(s)'
+    }
+    
+    # 构建result字段
+    result_list = []
+    fixed_datatype_fields = {'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name'}
+    for f in fields:
+        field_datatype = '1' if f in fixed_datatype_fields else 'character varying'
+        result_list.append({
+            'feildtype': 'VoLTE小区监控预警数据表-天',
+            'table': 'csem.f_nk_volte_keykpi_cell_d',
+            'tableName': 'VoLTE小区监控预警数据表-天',
+            'datatype': field_datatype,
+            'columntype': 1,
+            'feildName': field_names.get(f, f),
+            'feild': f,
+            'poly': '无',
+            'anyWay': '无',
+            'chart': '无',
+            'chartpoly': '无'
+        })
+    
+    payload = {
+        'draw': 1,
+        'start': 0,
+        'length': 200,
+        'total': 0,
+        'geographicdimension': '小区',
+        'timedimension': '天',
+        'enodebField': 'enodeb_id',
+        'cgiField': 'cgi',
+        'timeField': 'starttime',
+        'cellField': 'cell',
+        'cityField': 'city',
+        'columns': _build_columns_param(fields),
+        'order': [{'column': 0, 'dir': 'desc'}],
+        'search': {'value': '', 'regex': False},
+        'result': {'result': result_list, 'tableParams': {'supporteddimension': None, 'supportedtimedimension': ''}, 'columnname': ''},
+        'where': [
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '>=', 'val': '2026-04-19 00:00:00', 'whereCon': 'and', 'query': True},
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '<', 'val': '2026-04-19 23:59:59', 'whereCon': 'and', 'query': True},
+            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True}
+        ],
+        'indexcount': 0
+    }
+    print(f"[DEBUG-PAYLOAD] VoLTE小区监控预警 payload 生成完成，表名: csem.f_nk_volte_keykpi_cell_d")
+    return payload
+
+
+def get_epsfb_payload():
+    """获取EPSFB小区监控预警报表payload"""
+    print("[DEBUG-PAYLOAD] 生成 EPSFB小区监控预警 payload")
+    
+    # EPSFB字段（基于HAR日志中的实际字段）
+    fields = [
+        'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name',
+        'epsfb_ul_tunzi_len', 'epsfb_ul_dantong_len', 'epsfb_ul_duanxu_len', 'epsfb_ul_voice_sum_len',
+        'epsfb_ans_voice_call', 'epsfb_dl_tunzi_len', 'epsfb_dl_dantong_len', 'epsfb_dl_duanxu_len', 'epsfb_dl_voice_sum_len'
+    ]
+    
+    # 字段中文名映射
+    field_names = {
+        'starttime': '时间', 'city': '地市', 'cgi': '小区', 'grid': '责任网格', 'area': '区县', 'nrcell_name': '小区名称',
+        'epsfb_ul_tunzi_len': 'EPSFB语音上行吞字时长(s)', 'epsfb_ul_dantong_len': 'EPSFB语音上行单通时长(s)',
+        'epsfb_ul_duanxu_len': 'EPSFB语音上行断续时长(s)', 'epsfb_ul_voice_sum_len': 'EPSFB语音上行总时长(s)',
+        'epsfb_ans_voice_call': 'EPSFB语音通话总次数',
+        'epsfb_dl_tunzi_len': 'EPSFB语音下行吞字时长(s)', 'epsfb_dl_dantong_len': 'EPSFB语音下行单通时长(s)',
+        'epsfb_dl_duanxu_len': 'EPSFB语音下行断续时长(s)', 'epsfb_dl_voice_sum_len': 'EPSFB语音下行总时长(s)'
+    }
+    
+    # 构建result字段
+    result_list = []
+    fixed_datatype_fields = {'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name'}
+    for f in fields:
+        field_datatype = '1' if f in fixed_datatype_fields else 'character varying'
+        result_list.append({
+            'feildtype': 'EPSFB小区监控预警数据表-天',
+            'table': 'csem.f_nk_epsfb_keykpi_cell_d',
+            'tableName': 'EPSFB小区监控预警数据表-天',
+            'datatype': field_datatype,
+            'columntype': 1,
+            'feildName': field_names.get(f, f),
+            'feild': f,
+            'poly': '无',
+            'anyWay': '无',
+            'chart': '无',
+            'chartpoly': '无'
+        })
+    
+    payload = {
+        'draw': 1,
+        'start': 0,
+        'length': 200,
+        'total': 0,
+        'geographicdimension': '小区',
+        'timedimension': '天',
+        'enodebField': '---',  # EPSFB表使用---
+        'cgiField': 'cgi',
+        'timeField': 'starttime',
+        'cellField': 'cell',
+        'cityField': 'city',
+        'columns': _build_columns_param(fields),
+        'order': [{'column': 0, 'dir': 'desc'}],
+        'search': {'value': '', 'regex': False},
+        'result': {'result': result_list, 'tableParams': {'supporteddimension': None, 'supportedtimedimension': ''}, 'columnname': ''},
+        'where': [
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '>=', 'val': '2026-04-19 00:00:00', 'whereCon': 'and', 'query': True},
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '<', 'val': '2026-04-19 23:59:59', 'whereCon': 'and', 'query': True},
+            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True}
+        ],
+        'indexcount': 0
+    }
+    print(f"[DEBUG-PAYLOAD] EPSFB小区监控预警 payload 生成完成，表名: csem.f_nk_epsfb_keykpi_cell_d")
+    return payload
+
+
+def get_4g_voice_payload():
+    """获取4G语音小区报表payload（VoLTE+EPSFB联合） - 分别查询后合并"""
+    print("[DEBUG-PAYLOAD] 生成 4G语音小区报表 payload (联合模式)")
+    
+    # 返回None，表示需要特殊处理
+    # 这个函数不再直接生成payload，而是标记需要两个表分别查询
+    return None
+
+
+def get_5g_voice_payload():
+    """获取5G语音小区报表payload（VONR）"""
+    print("[DEBUG-PAYLOAD] 生成 5G语音小区报表 payload")
+    
+    # VONR语音相关字段
+    fields = [
+        'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name',
+        'vonr_ul_tunzi_len', 'vonr_ul_dantong_len', 'vonr_ul_duanxu_len', 'vonr_ul_voice_sum_len',
+        'vonr_ans_voice_call'
+    ]
+    
+    # 字段中文名映射
+    field_names = {
+        'starttime': '时间', 'city': '地市', 'cgi': '小区', 'grid': '责任网格', 'area': '区县', 'nrcell_name': '小区名称',
+        'vonr_ul_tunzi_len': 'VoNR语音上行吞字时长(s)', 'vonr_ul_dantong_len': 'VoNR语音上行单通时长(s)',
+        'vonr_ul_duanxu_len': 'VoNR语音上行断续时长(s)', 'vonr_ul_voice_sum_len': 'VoNR语音上行总时长(s)',
+        'vonr_ans_voice_call': 'VoNR语音通话总次数'
+    }
+    
+    # 构建result字段
+    result_list = []
+    fixed_datatype_fields = {'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name'}
+    for f in fields:
+        field_datatype = '1' if f in fixed_datatype_fields else 'character varying'
+        result_list.append({
+            'feildtype': '5G语音小区报表',
+            'table': 'csem.f_nk_vonr_keykpi_cell_d',
+            'tableName': '5G语音小区报表',
+            'datatype': field_datatype,
+            'columntype': 1,
+            'feildName': field_names.get(f, f),
+            'feild': f,
+            'poly': '无',
+            'anyWay': '无',
+            'chart': '无',
+            'chartpoly': '无'
+        })
+    
+    payload = {
+        'draw': 1,
+        'start': 0,
+        'length': 200,
+        'total': 0,
+        'geographicdimension': '小区',
+        'timedimension': '天',
+        'enodebField': 'gnodeb_id',
+        'cgiField': 'cgi',
+        'timeField': 'starttime',
+        'cellField': 'cell',
+        'cityField': 'city',
+        'columns': _build_columns_param(fields),
+        'order': [{'column': 0, 'dir': 'desc'}],
+        'search': {'value': '', 'regex': False},
+        'result': {'result': result_list, 'tableParams': {'supporteddimension': None, 'supportedtimedimension': ''}, 'columnname': ''},
+        'where': [
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '>=', 'val': '2026-04-19 00:00:00', 'whereCon': 'and', 'query': True},
+            {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '<', 'val': '2026-04-19 23:59:59', 'whereCon': 'and', 'query': True},
+            {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': '阳江', 'whereCon': 'and', 'query': True}
+        ],
+        'indexcount': 0
+    }
+    print(f"[DEBUG-PAYLOAD] 5G语音小区报表 payload 生成完成")
+    return payload
+
+
+def add_wanchenglv_columns(df, report_type='4g'):
+    """添加全程完好率计算列
+    
+    Args:
+        df: DataFrame数据
+        report_type: '4g' 或 '5g'
+    """
+    import numpy as np
+    
+    def safe_value(val):
+        """如果值为0或nan，返回1，否则返回原值"""
+        return np.where((pd.isna(val)) | (val == 0), 1, val)
+    
+    def safe_divide(numerator, denominator, fill_value=np.nan):
+        """安全的除法运算，防止除零错误"""
+        return np.where(denominator != 0, numerator / denominator, fill_value)
+    
+    def debug_column_stats(col_name, series, is_denominator=False):
+        """打印列的详细统计信息，帮助诊断除零问题"""
+        if isinstance(series, pd.Series):
+            zero_count = (series == 0).sum()
+            nan_count = series.isna().sum()
+            total = len(series)
+            print(f"  [DEBUG-WANCHENGLV] {col_name}: 总数={total}, 零值={zero_count}, NaN={nan_count}, 有效={total-zero_count-nan_count}")
+            if (zero_count > 0 or nan_count > 0) and total <= 100:  # 数据量小时显示详情
+                zero_or_nan_rows = series[(series == 0) | series.isna()].index.tolist()
+                print(f"  [DEBUG-WANCHENGLV]   零值/NaN行: {zero_or_nan_rows}")
+    
+    print(f"[DEBUG-WANCHENGLV] ========== 开始计算{'4G' if report_type == '4g' else '5G'}全程完好率 ==========")
+    print(f"[DEBUG-WANCHENGLV] DataFrame形状: {df.shape}")
+    print(f"[DEBUG-WANCHENGLV] DataFrame列名: {list(df.columns)}")
+    
+    if report_type == '4g':
+        # 4G全程完好率计算
+        print("[DEBUG-WANCHENGLV] === 4G全程完好率计算 ===")
+        
+        # 检查所需列是否存在
+        required_4g_cols = [
+            'RRC连接建立请求次数', 'RRC连接建立成功次数', 'E-RAB建立请求数', 'E-RAB建立成功数',
+            '遗留上下文个数', '切换入E-RAB数', '切出失败的E-RAB数', '正常的eNB请求释放的E-RAB数', 'eNB请求释放的E-RAB数',
+            '切换请求次数', '切换成功次数'
+        ]
+        missing_4g = [c for c in required_4g_cols if c not in df.columns]
+        if missing_4g:
+            print(f"[ERROR-WANCHENGLV] 4G计算缺少列: {missing_4g}")
+            return df
+        
+        # 4G无线接通率(%) = (RRC连接建立成功次数/RRC连接建立请求次数) * (E-RAB建立成功数/E-RAB建立请求数) * 100
+        print("[DEBUG-WANCHENGLV] >> 计算4G无线接通率...")
+        debug_column_stats('RRC连接建立请求次数', df['RRC连接建立请求次数'])
+        debug_column_stats('RRC连接建立成功次数', df['RRC连接建立成功次数'])
+        debug_column_stats('E-RAB建立请求数', df['E-RAB建立请求数'])
+        debug_column_stats('E-RAB建立成功数', df['E-RAB建立成功数'])
+        rrc_denom = df['RRC连接建立请求次数'].replace(0, np.nan)
+        erab_denom = df['E-RAB建立请求数'].replace(0, np.nan)
+        
+        # 检查分母为0的行
+        rrc_zero_rows = df[df['RRC连接建立请求次数'] == 0].index.tolist()
+        erab_zero_rows = df[df['E-RAB建立请求数'] == 0].index.tolist()
+        if rrc_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   RRC连接建立请求次数=0的行数: {len(rrc_zero_rows)}, 前10个: {rrc_zero_rows[:10]}")
+        if erab_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   E-RAB建立请求数=0的行数: {len(erab_zero_rows)}, 前10个: {erab_zero_rows[:10]}")
+        
+        df['4G无线接通率(%)'] = np.where(
+            (df['RRC连接建立请求次数'] > 0) & (df['E-RAB建立请求数'] > 0),
+            safe_divide(df['RRC连接建立成功次数'], rrc_denom, 0) * 
+            safe_divide(df['E-RAB建立成功数'], erab_denom, 0) * 100,
+            np.nan
+        )
+        print(f"[DEBUG-WANCHENGLV]   4G无线接通率结果: 有效={df['4G无线接通率(%)'].notna().sum()}, NaN={df['4G无线接通率(%)'].isna().sum()}")
+        
+        # 4GE-RAB掉线率 = (切出失败的E-RAB数 - 正常的eNB请求释放的E-RAB数 + eNB请求释放的E-RAB数) /
+        #                 (遗留上下文个数 + E-RAB建立成功数 + 切换入E-RAB数) * 100
+        print("[DEBUG-WANCHENGLV] >> 计算4GE-RAB掉线率...")
+        debug_column_stats('遗留上下文个数', df['遗留上下文个数'])
+        debug_column_stats('E-RAB建立成功数', df['E-RAB建立成功数'])
+        debug_column_stats('切换入E-RAB数', df['切换入E-RAB数'])
+        erab_drop_denom = df['遗留上下文个数'] + df['E-RAB建立成功数'] + df['切换入E-RAB数']
+        erab_drop_denom_safe = erab_drop_denom.replace(0, np.nan)
+        
+        drop_denom_zero_rows = df.index[erab_drop_denom == 0].tolist()
+        if drop_denom_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   4GE-RAB掉线率分母=0的行数: {len(drop_denom_zero_rows)}, 前10个: {drop_denom_zero_rows[:10]}")
+            # 显示这些行的分母组成
+            for row_idx in drop_denom_zero_rows[:3]:
+                print(f"     行{row_idx}: 遗留上下文={df.loc[row_idx, '遗留上下文个数']}, E-RAB成功={df.loc[row_idx, 'E-RAB建立成功数']}, 切换入={df.loc[row_idx, '切换入E-RAB数']}")
+        
+        df['4GE-RAB掉线率'] = np.where(
+            erab_drop_denom > 0,
+            safe_divide(
+                df['切出失败的E-RAB数'] - df['正常的eNB请求释放的E-RAB数'] + df['eNB请求释放的E-RAB数'],
+                erab_drop_denom_safe, 0
+            ) * 100,
+            np.nan
+        )
+        print(f"[DEBUG-WANCHENGLV]   4GE-RAB掉线率结果: 有效={df['4GE-RAB掉线率'].notna().sum()}, NaN={df['4GE-RAB掉线率'].isna().sum()}")
+        
+        # 4G切换成功率(%) = 切换成功次数 / 切换请求次数 * 100
+        print("[DEBUG-WANCHENGLV] >> 计算4G切换成功率...")
+        debug_column_stats('切换请求次数', df['切换请求次数'])
+        debug_column_stats('切换成功次数', df['切换成功次数'])
+        
+        ho_denom = df['切换请求次数'].replace(0, np.nan)
+        ho_zero_rows = df[df['切换请求次数'] == 0].index.tolist()
+        if ho_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   切换请求次数=0的行数: {len(ho_zero_rows)}, 前10个: {ho_zero_rows[:10]}")
+        
+        df['4G切换成功率(%)'] = np.where(
+            df['切换请求次数'] > 0,
+            safe_divide(df['切换成功次数'], ho_denom, 0) * 100,
+            np.nan
+        )
+        print(f"[DEBUG-WANCHENGLV]   4G切换成功率结果: 有效={df['4G切换成功率(%)'].notna().sum()}, NaN={df['4G切换成功率(%)'].isna().sum()}")
+        
+        # 4G全程完好率 = (4G无线接通率 / 100) * (4G切换成功率 / 100) * (100 - 4GE-RAB掉线率) * 100
+        # 简化为: 4G无线接通率 * 4G切换成功率 * (100 - 4GE-RAB掉线率) / 10000
+        # 当任一分量为0或nan时，默认视为1，避免除0错误
+        print("[DEBUG-WANCHENGLV] >> 计算4G全程完好率...")
+        wanchenglv_factor = safe_value(df['4G无线接通率(%)']) * safe_value(df['4G切换成功率(%)']) * safe_value(100 - df['4GE-RAB掉线率'])
+        
+        # 检查是否有inf或nan
+        inf_count = np.isinf(wanchenglv_factor).sum()
+        nan_count_factor = np.isnan(wanchenglv_factor).sum()
+        print(f"[DEBUG-WANCHENGLV]   wanchenglv_factor统计: inf={inf_count}, nan={nan_count_factor}")
+        if inf_count > 0:
+            inf_rows = df.index[np.isinf(wanchenglv_factor)].tolist()
+            print(f"[DEBUG-WANCHENGLV]   !!! 发现inf值! 行: {inf_rows[:10]}")
+        
+        # 当所有中间指标都是NaN时，最终结果也应该是NaN
+        all_valid = df['4G无线接通率(%)'].notna() & df['4G切换成功率(%)'].notna() & df['4GE-RAB掉线率'].notna()
+        invalid_rows = df.index[~all_valid].tolist()
+        if invalid_rows:
+            print(f"[DEBUG-WANCHENGLV]   中间指标有NaN的行数: {len(invalid_rows)}")
+        
+        df['4G全程完好率'] = np.where(all_valid, wanchenglv_factor / 10000, np.nan)
+        
+        # 最终检查
+        final_inf = np.isinf(df['4G全程完好率']).sum()
+        final_nan = df['4G全程完好率'].isna().sum()
+        final_valid = df['4G全程完好率'].notna().sum()
+        print(f"[DEBUG-WANCHENGLV]   4G全程完好率最终结果: 有效={final_valid}, NaN={final_nan}, inf={final_inf}")
+        
+    else:
+        # 5G全程完好率计算
+        print("[DEBUG-WANCHENGLV] === 5G全程完好率计算 ===")
+        
+        # 检查所需列是否存在
+        required_5g_cols = [
+            'RRC连接建立请求次数', 'RRC连接建立成功次数',
+            'Flow建立请求数', 'Flow建立成功数',
+            'NG接口UE相关逻辑信令连接建立请求次数', 'NG接口UE相关逻辑信令连接建立成功次数',
+            '初始上下文建立成功次数', '遗留上下文个数', '切换入成功次数', 'RRC连接重建成功次数(非源侧小区)',
+            'gNB请求释放上下文数', '正常的gNB请求释放上下文数',
+            'gNB间NG切换出成功次数', 'gNB间Xn切换出成功次数', 'CU内DU间切换出执行成功次数', 'CU内DU内切换出成功次数',
+            'gNB间NG切换出准备请求次数', 'gNB间Xn切换出准备请求次数', 'CU内DU间切换出执行请求次数', 'CU内DU内切换出执行请求次数'
+        ]
+        missing_5g = [c for c in required_5g_cols if c not in df.columns]
+        if missing_5g:
+            print(f"[ERROR-WANCHENGLV] 5G计算缺少列: {missing_5g}")
+            return df
+        # SA无线接通率% = (RRC连接建立成功次数/RRC连接建立请求次数) *
+        #                (Flow建立成功数/Flow建立请求数) *
+        #                (NG接口UE相关逻辑信令连接建立成功次数/NG接口UE相关逻辑信令连接建立请求次数) * 100
+        rrc_denom = df['RRC连接建立请求次数'].replace(0, np.nan)
+        flow_denom = df['Flow建立请求数'].replace(0, np.nan)
+        ng_denom = df['NG接口UE相关逻辑信令连接建立请求次数'].replace(0, np.nan)
+        
+        # 检查分母为0的行
+        rrc_zero_rows = df[df['RRC连接建立请求次数'] == 0].index.tolist()
+        flow_zero_rows = df[df['Flow建立请求数'] == 0].index.tolist()
+        ng_zero_rows = df[df['NG接口UE相关逻辑信令连接建立请求次数'] == 0].index.tolist()
+        if rrc_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   RRC连接建立请求次数=0的行数: {len(rrc_zero_rows)}, 前10个: {rrc_zero_rows[:10]}")
+        if flow_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   Flow建立请求数=0的行数: {len(flow_zero_rows)}, 前10个: {flow_zero_rows[:10]}")
+        if ng_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   NG接口UE相关逻辑信令连接建立请求次数=0的行数: {len(ng_zero_rows)}, 前10个: {ng_zero_rows[:10]}")
+        
+        df['SA无线接通率%'] = np.where(
+            (df['RRC连接建立请求次数'] > 0) & (df['Flow建立请求数'] > 0) & (df['NG接口UE相关逻辑信令连接建立请求次数'] > 0),
+            safe_divide(df['RRC连接建立成功次数'], rrc_denom, 0) *
+            safe_divide(df['Flow建立成功数'], flow_denom, 0) *
+            safe_divide(df['NG接口UE相关逻辑信令连接建立成功次数'], ng_denom, 0) * 100,
+            np.nan
+        )
+        print(f"[DEBUG-WANCHENGLV]   SA无线接通率结果: 有效={df['SA无线接通率%'].notna().sum()}, NaN={df['SA无线接通率%'].isna().sum()}")
+        
+        # SA无线掉线率% = (gNB请求释放上下文数 - 正常的gNB请求释放上下文数) /
+        #                (初始上下文建立成功次数 + 遗留上下文个数 + 切换入成功次数 + RRC连接重建成功次数(非源侧小区)) * 100
+        print("[DEBUG-WANCHENGLV] >> 计算SA无线掉线率...")
+        debug_column_stats('初始上下文建立成功次数', df['初始上下文建立成功次数'])
+        debug_column_stats('遗留上下文个数', df['遗留上下文个数'])
+        debug_column_stats('切换入成功次数', df['切换入成功次数'])
+        debug_column_stats('RRC连接重建成功次数(非源侧小区)', df['RRC连接重建成功次数(非源侧小区)'])
+        debug_column_stats('gNB请求释放上下文数', df['gNB请求释放上下文数'])
+        debug_column_stats('正常的gNB请求释放上下文数', df['正常的gNB请求释放上下文数'])
+        
+        drop_denom = (df['初始上下文建立成功次数'] + df['遗留上下文个数'] + 
+                      df['切换入成功次数'] + df['RRC连接重建成功次数(非源侧小区)'])
+        drop_denom_safe = drop_denom.replace(0, np.nan)
+        
+        drop_denom_zero_rows = df.index[drop_denom == 0].tolist()
+        if drop_denom_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   SA无线掉线率分母=0的行数: {len(drop_denom_zero_rows)}, 前10个: {drop_denom_zero_rows[:10]}")
+            for row_idx in drop_denom_zero_rows[:3]:
+                print(f"     行{row_idx}: 初始上下文={df.loc[row_idx, '初始上下文建立成功次数']}, 遗留={df.loc[row_idx, '遗留上下文个数']}, 切换入={df.loc[row_idx, '切换入成功次数']}, 重建立={df.loc[row_idx, 'RRC连接重建成功次数(非源侧小区)']}")
+        
+        df['SA无线掉线率%'] = np.where(
+            drop_denom > 0,
+            safe_divide(
+                df['gNB请求释放上下文数'] - df['正常的gNB请求释放上下文数'],
+                drop_denom_safe, 0
+            ) * 100,
+            np.nan
+        )
+        print(f"[DEBUG-WANCHENGLV]   SA无线掉线率结果: 有效={df['SA无线掉线率%'].notna().sum()}, NaN={df['SA无线掉线率%'].isna().sum()}")
+        
+        # SA切换成功率% = (gNB间NG切换出成功次数 + gNB间Xn切换出成功次数 + 
+        #                  CU内DU间切换出执行成功次数 + CU内DU内切换出成功次数) /
+        #                 (gNB间NG切换出准备请求次数 + gNB间Xn切换出准备请求次数 + 
+        #                  CU内DU间切换出执行请求次数 + CU内DU内切换出执行请求次数) * 100
+        print("[DEBUG-WANCHENGLV] >> 计算SA切换成功率...")
+        debug_column_stats('gNB间NG切换出成功次数', df['gNB间NG切换出成功次数'])
+        debug_column_stats('gNB间Xn切换出成功次数', df['gNB间Xn切换出成功次数'])
+        debug_column_stats('CU内DU间切换出执行成功次数', df['CU内DU间切换出执行成功次数'])
+        debug_column_stats('CU内DU内切换出成功次数', df['CU内DU内切换出成功次数'])
+        debug_column_stats('gNB间NG切换出准备请求次数', df['gNB间NG切换出准备请求次数'])
+        debug_column_stats('gNB间Xn切换出准备请求次数', df['gNB间Xn切换出准备请求次数'])
+        debug_column_stats('CU内DU间切换出执行请求次数', df['CU内DU间切换出执行请求次数'])
+        debug_column_stats('CU内DU内切换出执行请求次数', df['CU内DU内切换出执行请求次数'])
+        
+        success_sum = (df['gNB间NG切换出成功次数'] + df['gNB间Xn切换出成功次数'] + 
+                      df['CU内DU间切换出执行成功次数'] + df['CU内DU内切换出成功次数'])
+        attempt_sum = (df['gNB间NG切换出准备请求次数'] + df['gNB间Xn切换出准备请求次数'] + 
+                      df['CU内DU间切换出执行请求次数'] + df['CU内DU内切换出执行请求次数'])
+        attempt_sum_safe = attempt_sum.replace(0, np.nan)
+        
+        attempt_zero_rows = df.index[attempt_sum == 0].tolist()
+        if attempt_zero_rows:
+            print(f"[DEBUG-WANCHENGLV]   SA切换成功率分母=0的行数: {len(attempt_zero_rows)}, 前10个: {attempt_zero_rows[:10]}")
+            for row_idx in attempt_zero_rows[:3]:
+                print(f"     行{row_idx}: gNB间NG={df.loc[row_idx, 'gNB间NG切换出准备请求次数']}, gNB间Xn={df.loc[row_idx, 'gNB间Xn切换出准备请求次数']}, CU内DU间={df.loc[row_idx, 'CU内DU间切换出执行请求次数']}, CU内DU内={df.loc[row_idx, 'CU内DU内切换出执行请求次数']}")
+        
+        df['SA切换成功率%'] = np.where(
+            attempt_sum > 0,
+            safe_divide(success_sum, attempt_sum_safe, 0) * 100,
+            np.nan
+        )
+        print(f"[DEBUG-WANCHENGLV]   SA切换成功率结果: 有效={df['SA切换成功率%'].notna().sum()}, NaN={df['SA切换成功率%'].isna().sum()}")
+        
+        # 5G全程完好率 = (SA无线接通率 / 100) * (SA切换成功率 / 100) * (100 - SA无线掉线率) * 100
+        # 简化为: SA无线接通率 * SA切换成功率 * (100 - SA无线掉线率) / 10000
+        # 当任一分量为0或nan时，默认视为1，避免除0错误
+        print("[DEBUG-WANCHENGLV] >> 计算5G全程完好率...")
+        wanchenglv_factor = safe_value(df['SA无线接通率%']) * safe_value(df['SA切换成功率%']) * safe_value(100 - df['SA无线掉线率%'])
+        
+        # 检查是否有inf或nan
+        inf_count = np.isinf(wanchenglv_factor).sum()
+        nan_count_factor = np.isnan(wanchenglv_factor).sum()
+        print(f"[DEBUG-WANCHENGLV]   wanchenglv_factor统计: inf={inf_count}, nan={nan_count_factor}")
+        if inf_count > 0:
+            inf_rows = df.index[np.isinf(wanchenglv_factor)].tolist()
+            print(f"[DEBUG-WANCHENGLV]   !!! 发现inf值! 行: {inf_rows[:10]}")
+        
+        # 当所有中间指标都是NaN时，最终结果也应该是NaN
+        all_valid = df['SA无线接通率%'].notna() & df['SA切换成功率%'].notna() & df['SA无线掉线率%'].notna()
+        invalid_rows = df.index[~all_valid].tolist()
+        if invalid_rows:
+            print(f"[DEBUG-WANCHENGLV]   中间指标有NaN的行数: {len(invalid_rows)}")
+        
+        df['5G全程完好率'] = np.where(all_valid, wanchenglv_factor / 10000, np.nan)
+        
+        # 最终检查
+        final_inf = np.isinf(df['5G全程完好率']).sum()
+        final_nan = df['5G全程完好率'].isna().sum()
+        final_valid = df['5G全程完好率'].notna().sum()
+        print(f"[DEBUG-WANCHENGLV]   5G全程完好率最终结果: 有效={final_valid}, NaN={final_nan}, inf={final_inf}")
+    
+    print("[DEBUG-WANCHENGLV] ========== 计算完成 ==========")
+    return df
+
+
+def add_4g_voice_columns(df):
+    """添加4G语音小区计算列（VoLTE+EPSFB联合）"""
+    import numpy as np
+    
+    # 4G语音通话质差时长比例 = 
+    # (VoLTE语音上行吞字时长 + VoLTE语音上行单通时长 + VoLTE语音上行断续时长 +
+    #  EPSFB语音上行吞字时长 + EPSFB语音上行单通时长 + EPSFB语音上行断续时长) /
+    # (VoLTE语音上行总时长 + EPSFB语音上行总时长)
+    total_bad = (df['VoLTE语音上行吞字时长(s)'].fillna(0) + df['VoLTE语音上行单通时长(s)'].fillna(0) + 
+                  df['VoLTE语音上行断续时长(s)'].fillna(0) + df['EPSFB语音上行吞字时长(s)'].fillna(0) + 
+                  df['EPSFB语音上行单通时长(s)'].fillna(0) + df['EPSFB语音上行断续时长(s)'].fillna(0))
+    total_sum = df['VoLTE语音上行总时长(s)'].fillna(0) + df['EPSFB语音上行总时长(s)'].fillna(0)
+    
+    df['4G语音通话质差时长比例'] = np.where(total_sum > 0, total_bad / total_sum, np.nan)
+    
+    # 4G差小区判定：(VoLTE语音通话质差时长比例>2%且VoLTE通话次数>1000) 或者 (EPSFB语音通话质差时长比例>2%且EPSFB通话次数>1000)
+    volte_bad_ratio = np.where(
+        df['VoLTE语音上行总时长(s)'].fillna(0) > 0,
+        (df['VoLTE语音上行吞字时长(s)'].fillna(0) + df['VoLTE语音上行单通时长(s)'].fillna(0) + df['VoLTE语音上行断续时长(s)'].fillna(0)) /
+        df['VoLTE语音上行总时长(s)'].fillna(0),
+        0
+    )
+    epsfb_bad_ratio = np.where(
+        df['EPSFB语音上行总时长(s)'].fillna(0) > 0,
+        (df['EPSFB语音上行吞字时长(s)'].fillna(0) + df['EPSFB语音上行单通时长(s)'].fillna(0) + df['EPSFB语音上行断续时长(s)'].fillna(0)) /
+        df['EPSFB语音上行总时长(s)'].fillna(0),
+        0
+    )
+    
+    df['4G差小区'] = ((volte_bad_ratio > 0.02) & (df['VoLTE语音通话总次数'] > 1000)) | \
+                     ((epsfb_bad_ratio > 0.02) & (df['EPSFB语音通话总次数'] > 1000))
+    
+    return df
+
+
+def add_5g_voice_columns(df):
+    """添加5G语音小区计算列（VONR）"""
+    import numpy as np
+    
+    # 5G语音通话质差时长比例 = (VoNR语音上行吞字时长 + VoNR语音上行单通时长 + VoNR语音上行断续时长) / VoNR语音上行总时长
+    total_bad = (df['VoNR语音上行吞字时长(s)'].fillna(0) + df['VoNR语音上行单通时长(s)'].fillna(0) + 
+                 df['VoNR语音上行断续时长(s)'].fillna(0))
+    total_sum = df['VoNR语音上行总时长(s)'].fillna(0)
+    
+    df['5G语音通话质差时长比例'] = np.where(total_sum > 0, total_bad / total_sum, np.nan)
+    
+    # 5G差小区：5G语音通话质差时长比例>2% 且 5G通话次数>1000次
+    df['5G差小区'] = (df['5G语音通话质差时长比例'] > 0.02) & (df['VoNR语音通话总次数'] > 1000)
+    
+    return df
+
+
 def get_5g_kpi_payload():
     """获取5G小区性能KPI报表payload（硬编码，字段与浏览器一致）"""
     print("[DEBUG-PAYLOAD] 生成 5G小区性能KPI报表 payload")
@@ -3337,6 +4265,34 @@ class CustomDataExtractor:
         self.jxcx = JXCXQuery(self.login_mgr.sess)
         return self.jxcx.enter_jxcx(retry_times=3, timeout=60)
     
+    def check_and_relogin(self):
+        """检查session是否有效，如果无效则重新登录"""
+        if not self.login_mgr:
+            return False
+        
+        # 检查CASTGC cookie是否存在
+        castgc = self.login_mgr.sess.cookies.get('CASTGC', domain='nqi.gmcc.net')
+        if not castgc:
+            castgc = self.login_mgr.sess.cookies.get('CASTGC')
+        
+        if not castgc:
+            print("[WARNING] CASTGC cookie不存在或已过期，尝试重新登录...")
+            # 尝试使用保存的cookie登录
+            saved_cookie = load_cookie(self.username)
+            if saved_cookie:
+                self.login_mgr.sess.cookies = saved_cookie
+                if self.login_mgr._check_session():
+                    print("[SUCCESS] 使用保存的Cookie重新登录成功！")
+                    # 重新初始化jxcx
+                    self.jxcx = JXCXQuery(self.login_mgr.sess)
+                    return self.jxcx.enter_jxcx(retry_times=2, timeout=60)
+            
+            # 保存的cookie也无效，需要重新登录
+            print("[WARNING] 保存的Cookie也失效，需要重新登录")
+            return False
+        
+        return True
+    
     def extract_data(self, payload, start_date, end_date, city):
         """提取数据"""
         if not self.jxcx:
@@ -3391,10 +4347,13 @@ class CustomDataExtractor:
         payload_func = table_config.get('payload_func')
         if payload_func:
             payload = payload_func()
+            # 如果返回None（4G语音小区等特殊报表），返回特殊标记让调用方处理
+            if payload is None:
+                return {'__special__': '4G_VOICE_MERGE', 'start_date': start_date, 'end_date': end_date, 'city': city}
             payload = set_payload_time(payload, start_date + ' 00:00:00', end_date + ' 23:59:59')
             payload = set_payload_city(payload, city)
             return payload
-        
+
         return None
     
     def save_to_excel(self, df, filename):
@@ -3447,6 +4406,44 @@ class CustomDataExtractor:
             print(f"追加数据到Excel失败: {e}")
             raise
 
+    def save_4g_voice_to_excel(self, volte_df, epsfb_df, merged_df, filename):
+        """保存4G语音小区数据到Excel（三个Sheet）
+
+        Args:
+            volte_df: VoLTE原始数据
+            epsfb_df: EPSFB原始数据
+            merged_df: 合并后的计算结果
+            filename: 文件名
+        """
+        if volte_df.empty and epsfb_df.empty and merged_df.empty:
+            return None
+
+        ensure_dirs()
+        filepath = os.path.join(OUTPUT_DIR, filename)
+
+        try:
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                # Sheet1: VoLTE数据
+                if not volte_df.empty:
+                    volte_df.to_excel(writer, sheet_name='VoLTE数据', index=False)
+                    print(f"VoLTE数据: {len(volte_df)} 行")
+
+                # Sheet2: EPSFB数据
+                if not epsfb_df.empty:
+                    epsfb_df.to_excel(writer, sheet_name='EPSFB数据', index=False)
+                    print(f"EPSFB数据: {len(epsfb_df)} 行")
+
+                # Sheet3: 聚合计算结果
+                if not merged_df.empty:
+                    merged_df.to_excel(writer, sheet_name='聚合计算', index=False)
+                    print(f"聚合计算: {len(merged_df)} 行")
+
+            print(f"4G语音小区数据已保存到: {filepath}")
+            return filepath
+        except Exception as e:
+            print(f"保存4G语音小区Excel失败: {e}")
+            return None
+
     def _finalize_per_day_excel(self, filepath, expected_sheets):
         """清理按日分Sheet模式创建的临时文件"""
         try:
@@ -3494,16 +4491,6 @@ class TableConfig:
             'use_interference_filter': False,
             'description': '重要场景-小区天粒度'
         },
-        '5G小区工参报表': {
-            'payload_func': get_5g_cfg_payload,
-            'use_interference_filter': False,
-            'description': '5G小区工参报表'
-        },
-        '4G小区工参报表': {
-            'payload_func': get_4g_cfg_payload,
-            'use_interference_filter': False,
-            'description': '4G小区工参报表'
-        },
         'VoLTE小区监控预警': {
             'payload_func': get_volte_warning_payload,
             'use_interference_filter': False,
@@ -3528,6 +4515,30 @@ class TableConfig:
             'payload_func': get_4g_kpi_payload,
             'use_interference_filter': False,
             'description': '4G小区性能KPI报表'
+        },
+        '4G全程完好率报表': {
+            'payload_func': get_4g_wanchenglv_payload,
+            'use_interference_filter': False,
+            'calc_columns': ['4G全程完好率'],
+            'description': '4G全程完好率报表'
+        },
+        '5G全程完好率报表': {
+            'payload_func': get_5g_wanchenglv_payload,
+            'use_interference_filter': False,
+            'calc_columns': ['5G全程完好率'],
+            'description': '5G全程完好率报表'
+        },
+        '4G语音小区': {
+            'payload_func': get_4g_voice_payload,
+            'use_interference_filter': False,
+            'calc_columns': ['4G语音小区'],
+            'description': '4G语音小区（VoLTE+EPSFB联合）'
+        },
+        '5G语音小区': {
+            'payload_func': get_5g_voice_payload,
+            'use_interference_filter': False,
+            'calc_columns': ['5G语音小区'],
+            'description': '5G语音小区（VONR）'
         },
     }
 
@@ -3556,6 +4567,9 @@ class MultiSelectDropdown(ttk.Frame):
         # 下拉框变量
         self.var = tk.StringVar(value="")
         
+        # 记录选择顺序（解决显示顺序问题）
+        self._selected_order = []
+        
         # 创建 Entry
         self.entry = ttk.Entry(self, textvariable=self.var, width=width, state='readonly')
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -3580,7 +4594,7 @@ class MultiSelectDropdown(ttk.Frame):
             self.check_vars[val] = var
             cb = ttk.Checkbutton(
                 self.check_frame, text=val, variable=var,
-                command=lambda v=val: self._on_check_change()
+                command=lambda v=val: self._on_check_change(v)
             )
             cb.pack(anchor=tk.W, padx=5, pady=1)
         
@@ -3603,31 +4617,79 @@ class MultiSelectDropdown(ttk.Frame):
             self._show_dropdown()
     
     def _show_dropdown(self):
-        """显示下拉框"""
+        """显示下拉框（自适应屏幕空间）"""
+        self.dropdown.update_idletasks()
+
+        # 获取 Entry 的位置和尺寸
+        entry_x = self.entry.winfo_rootx()
+        entry_y = self.entry.winfo_rooty()
+        entry_h = self.entry.winfo_height()
+
+        # 获取下拉框的所需尺寸
+        dropdown_w = self.dropdown.winfo_reqwidth()
+        dropdown_h = self.dropdown.winfo_reqheight()
+
+        # 获取屏幕工作区域尺寸（排除任务栏等）
+        screen_w = self.dropdown.winfo_screenwidth()
+        screen_h = self.dropdown.winfo_screenheight()
+
+        # 计算下方和上方可用的空间
+        space_below = screen_h - (entry_y + entry_h)
+        space_above = entry_y
+
+        # 判断应该显示在上方还是下方
+        # 优先显示在下方，如果下方空间不够但上方够用，则显示在上方
+        if space_below >= dropdown_h or space_below >= space_above:
+            # 显示在下方
+            y = entry_y + entry_h
+        else:
+            # 显示在上方
+            y = entry_y - dropdown_h
+
+        # 确保不会超出屏幕左右边界
+        if entry_x + dropdown_w > screen_w:
+            x = screen_w - dropdown_w
+        else:
+            x = entry_x
+
+        # 确保不会超出屏幕上边界
+        if y < 0:
+            y = 0
+
+        self.dropdown.geometry(f"{dropdown_w}x{dropdown_h}+{x}+{y}")
         self.dropdown.deiconify()
-        # 定位到 Entry 下方
-        x = self.entry.winfo_rootx()
-        y = self.entry.winfo_rooty() + self.entry.winfo_height()
-        self.dropdown.geometry(f"+{x}+{y}")
         self.dropdown.lift()
     
-    def _on_check_change(self):
-        """复选框状态变化"""
-        pass
+    def _on_check_change(self, val=None):
+        """复选框状态变化 - 记录选择顺序"""
+        if val is not None:
+            var = self.check_vars.get(val)
+            if var:
+                if var.get():
+                    # 选中：添加到顺序列表（避免重复）
+                    if val not in self._selected_order:
+                        self._selected_order.append(val)
+                else:
+                    # 取消选中：从顺序列表移除
+                    if val in self._selected_order:
+                        self._selected_order.remove(val)
     
     def _select_all(self):
         """全选"""
+        self._selected_order = list(self.values)  # 按values顺序记录
         for var in self.check_vars.values():
             var.set(True)
     
     def _deselect_all(self):
         """取消全选"""
+        self._selected_order = []
         for var in self.check_vars.values():
             var.set(False)
     
     def _confirm(self):
         """确认选择"""
-        selected = self.get_selected()
+        # 使用记录的选择顺序返回，而不是字典遍历顺序
+        selected = [val for val in self._selected_order if val in self.check_vars and self.check_vars[val].get()]
         if selected:
             self.var.set(','.join(selected))
         else:
@@ -3640,8 +4702,12 @@ class MultiSelectDropdown(ttk.Frame):
     
     def set_selected(self, values):
         """设置选中的值"""
+        # 先清空选择顺序
+        self._selected_order = []
         for val, var in self.check_vars.items():
             var.set(val in values)
+            if val in values:
+                self._selected_order.append(val)
         if values:
             self.var.set(','.join(values))
         else:
@@ -3665,8 +4731,8 @@ class UniversalExtractorGUI:
     def __init__(self, root, expiry_time=None):
         self.root = root
         self.root.title("通用数据提取工具")
-        self.root.geometry("1100x800")
-        self.root.minsize(950, 700)
+        self.root.geometry("950x650")
+        self.root.minsize(800, 600)
         self.root.resizable(True, True)
         
         # 授权过期时间
@@ -3730,7 +4796,7 @@ class UniversalExtractorGUI:
     def setup_logging(self):
         """初始化日志系统"""
         ensure_dirs()
-        log_filename = datetime.now().strftime("universal_gui_log_%Y%m%d_%H%M%S.log")
+        log_filename = datetime.now().strftime("universal_gui_log_%Y%m%d.log")
         self.log_file_path = os.path.join(LOG_DIR, log_filename)
 
         set_log_file(self.log_file_path)
@@ -3849,32 +4915,64 @@ class UniversalExtractorGUI:
     def _build_query_card(self, parent):
         """构建查询参数卡片"""
         card = self._build_card(parent, "🔍 查询参数")
-        card.pack(fill=tk.X, pady=(0, 10))
+        card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         body = tk.Frame(card, bg='white')
         body.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
 
         top_row = tk.Frame(body, bg='white')
-        top_row.pack(fill=tk.X, pady=(0, 12))
+        top_row.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
 
-        # 左侧：数据分类
-        cat_frame = tk.Frame(top_row, bg='#f8f9fa', bd=1)
-        cat_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
+        # ========== 左侧：数据分类（带滚动条）==========
+        cat_outer = tk.Frame(top_row, bg='#f8f9fa', bd=1)
+        cat_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
 
-        tk.Label(cat_frame, text="数据分类", font=('Microsoft YaHei UI', 10, 'bold'),
+        tk.Label(cat_outer, text="数据分类", font=('Microsoft YaHei UI', 10, 'bold'),
                 bg='#f8f9fa', fg='#202124', padx=12, pady=8).pack(anchor='w')
+
+        # 创建可滚动区域
+        cat_scroll_frame = tk.Frame(cat_outer, bg='#f8f9fa')
+        cat_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        cat_canvas = tk.Canvas(cat_scroll_frame, bg='#f8f9fa', highlightthickness=0,
+                               height=150)
+        cat_scrollbar = ttk.Scrollbar(cat_scroll_frame, orient=tk.VERTICAL,
+                                      command=cat_canvas.yview)
+        cat_canvas.configure(yscrollcommand=cat_scrollbar.set)
+
+        cat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        cat_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        cat_inner = tk.Frame(cat_canvas, bg='#f8f9fa')
+        cat_canvas.create_window((0, 0), window=cat_inner, anchor='nw')
+
+        def on_cat_configure(event):
+            cat_canvas.configure(scrollregion=cat_canvas.bbox('all'))
+
+        cat_inner.bind('<Configure>', on_cat_configure)
+
+        # 鼠标滚轮支持（跨平台）
+        def on_cat_mousewheel(event):
+            cat_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def on_cat_bound_to_mousewheel(event):
+            cat_canvas.bind_all('<MouseWheel>', on_cat_mousewheel)
+
+        def on_cat_unbound_to_mousewheel(event):
+            cat_canvas.unbind_all('<MouseWheel>')
+
+        cat_canvas.bind('<Enter>', on_cat_bound_to_mousewheel)
+        cat_canvas.bind('<Leave>', on_cat_unbound_to_mousewheel)
 
         self.category_vars = {}
         categories = [
             ("干扰", False),
             ("容量", False),
-            ("工参", False),
             ("语音报表", False),
-            ("小区性能", False)
+            ("小区性能", False),
+            ("全程完好率", False),
+            ("语音小区", False)
         ]
-
-        cat_inner = tk.Frame(cat_frame, bg='#f8f9fa')
-        cat_inner.pack(fill=tk.X, padx=8, pady=(0, 8))
 
         for name, checked in categories:
             var = tk.IntVar(value=int(checked))
@@ -3889,23 +4987,55 @@ class UniversalExtractorGUI:
                                command=lambda c=name: self._on_category_changed(c))
             cb.pack(anchor='w', pady=2)
 
-        # 右侧：数据表选择
-        table_frame = tk.Frame(top_row, bg='#f8f9fa', bd=1)
-        table_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # ========== 右侧：数据表选择（带滚动条）==========
+        table_outer = tk.Frame(top_row, bg='#f8f9fa', bd=1)
+        table_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tk.Label(table_frame, text="选择数据表", font=('Microsoft YaHei UI', 10, 'bold'),
+        tk.Label(table_outer, text="选择数据表", font=('Microsoft YaHei UI', 10, 'bold'),
                 bg='#f8f9fa', fg='#202124', padx=12, pady=8).pack(anchor='w')
 
-        tables_grid = tk.Frame(table_frame, bg='#f8f9fa')
-        tables_grid.pack(fill=tk.X, padx=8)
+        # 创建可滚动区域
+        table_scroll_frame = tk.Frame(table_outer, bg='#f8f9fa')
+        table_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        table_canvas = tk.Canvas(table_scroll_frame, bg='#f8f9fa', highlightthickness=0,
+                                 height=150)
+        table_scrollbar = ttk.Scrollbar(table_scroll_frame, orient=tk.VERTICAL,
+                                        command=table_canvas.yview)
+        table_canvas.configure(yscrollcommand=table_scrollbar.set)
+
+        table_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        table_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tables_grid = tk.Frame(table_canvas, bg='#f8f9fa')
+        table_canvas.create_window((0, 0), window=tables_grid, anchor='nw')
+
+        def on_table_configure(event):
+            table_canvas.configure(scrollregion=table_canvas.bbox('all'))
+
+        tables_grid.bind('<Configure>', on_table_configure)
+
+        # 鼠标滚轮支持（跨平台）
+        def on_table_mousewheel(event):
+            table_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def on_table_bound_to_mousewheel(event):
+            table_canvas.bind_all('<MouseWheel>', on_table_mousewheel)
+
+        def on_table_unbound_to_mousewheel(event):
+            table_canvas.unbind_all('<MouseWheel>')
+
+        table_canvas.bind('<Enter>', on_table_bound_to_mousewheel)
+        table_canvas.bind('<Leave>', on_table_unbound_to_mousewheel)
 
         self.table_vars = {}
         TABLE_CATEGORIES = {
             '干扰': ['5G干扰小区', '4G干扰小区'],
             '容量': ['5G小区容量报表', '重要场景-天'],
-            '工参': ['5G小区工参报表', '4G小区工参报表'],
             '语音报表': ['VoLTE小区监控预警', 'VONR小区监控预警', 'EPSFB小区监控预警'],
             '小区性能': ['5G小区性能KPI报表', '4G小区性能KPI报表'],
+            '全程完好率': ['4G全程完好率报表', '5G全程完好率报表'],
+            '语音小区': ['4G语音小区', '5G语音小区'],
         }
 
         all_tables = []
@@ -3926,7 +5056,7 @@ class UniversalExtractorGUI:
             cb.grid(row=row, column=col, sticky='w', padx=(0, 25), pady=2)
 
         # 全选按钮
-        btn_frame = tk.Frame(table_frame, bg='#f8f9fa')
+        btn_frame = tk.Frame(table_outer, bg='#f8f9fa')
         btn_frame.pack(fill=tk.X, padx=8, pady=(8, 8))
         tk.Button(btn_frame, text="全选", font=('Microsoft YaHei UI', 9, 'bold'),
                  bg='#e8eaed', fg='#202124', bd=0, padx=14, pady=4,
@@ -4140,9 +5270,41 @@ class UniversalExtractorGUI:
 
     def _build_bottom_section(self, parent):
         """构建底部日志区域"""
-        # 底部容器 - 关键：确保能占满剩余空间
-        bottom = tk.Frame(parent, bg='white')
-        bottom.pack(fill=tk.BOTH, expand=True)
+        # 创建滚动容器
+        scroll_container = tk.Frame(parent)
+        scroll_container.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
+
+        # 创建 Canvas 和滚动条
+        bottom_canvas = tk.Canvas(scroll_container, bg='white', highlightthickness=0,
+                                  height=200)
+        bottom_scrollbar = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL,
+                                         command=bottom_canvas.yview)
+        bottom_canvas.configure(yscrollcommand=bottom_scrollbar.set)
+
+        bottom_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        bottom_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Canvas 内部的可滚动 Frame
+        bottom = tk.Frame(bottom_canvas, bg='white')
+        bottom_canvas.create_window((0, 0), window=bottom, anchor='nw')
+
+        def on_bottom_configure(event):
+            bottom_canvas.configure(scrollregion=bottom_canvas.bbox('all'))
+
+        bottom.bind('<Configure>', on_bottom_configure)
+
+        # 鼠标滚轮支持
+        def on_mousewheel(event):
+            bottom_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def bound_to_mousewheel(event):
+            bottom_canvas.bind_all('<MouseWheel>', on_mousewheel)
+
+        def unbound_to_mousewheel(event):
+            bottom_canvas.unbind_all('<MouseWheel>')
+
+        bottom_canvas.bind('<Enter>', bound_to_mousewheel)
+        bottom_canvas.bind('<Leave>', unbound_to_mousewheel)
 
         progress_area = tk.Frame(bottom, bg='white')
         progress_area.pack(fill=tk.X, padx=16, pady=(10, 6))
@@ -4179,15 +5341,21 @@ class UniversalExtractorGUI:
                  cursor='hand2', padx=10, pady=2,
                  command=self.clear_log).pack(side=tk.RIGHT)
 
-        # 日志框架 - 关键修改：确保填充并扩展
+        # 日志框架 - 关键修改：确保填充并扩展，添加滚动条支持
         log_frame = tk.Frame(bottom, bg='#1e1e1e')
         log_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 8))
+
+        # 创建日志文本框和滚动条
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.log_text = tk.Text(log_frame, wrap=tk.WORD, font=('Consolas', 10),
                           bg='#1e1e1e', fg='#4ec9b0', bd=0,
                           padx=12, pady=6, state='disabled',
-                          insertbackground='white')
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+                          insertbackground='white',
+                          yscrollcommand=log_scroll.set)
+        self.log_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        log_scroll.config(command=self.log_text.yview)
 
         self.log_text.tag_config("#3c4043", foreground="#9aa0a6")
         self.log_text.tag_config("#34a853", foreground="#34a853")
@@ -4220,9 +5388,10 @@ class UniversalExtractorGUI:
         TABLE_CATEGORIES = {
             '干扰': ['5G干扰小区', '4G干扰小区'],
             '容量': ['5G小区容量报表', '重要场景-天'],
-            '工参': ['5G小区工参报表', '4G小区工参报表'],
             '语音报表': ['VoLTE小区监控预警', 'VONR小区监控预警', 'EPSFB小区监控预警'],
             '小区性能': ['5G小区性能KPI报表', '4G小区性能KPI报表'],
+            '全程完好率': ['4G全程完好率报表', '5G全程完好率报表'],
+            '语音小区': ['4G语音小区', '5G语音小区'],
         }
 
         is_checked = self.category_vars[category_name].get()
@@ -4489,6 +5658,12 @@ class UniversalExtractorGUI:
                     failed_count += 1
                     continue
 
+                # 4G语音小区不支持按日分Sheet模式，需要统一保存为三个Sheet
+                is_4g_voice = table_config.get('calc_columns', []) == ['4G语音小区']
+                effective_per_day_sheet = is_per_day_sheet and not is_4g_voice
+                if is_4g_voice and is_per_day_sheet:
+                    self.log(f"  (注: 4G语音小区不支持按日分Sheet，将合并为一个文件)", "INFO")
+
                 if is_multi_day:
                     # 多日模式：按日期逐天提取
                     try:
@@ -4506,7 +5681,7 @@ class UniversalExtractorGUI:
                         # 用于按日分Sheet模式：直接写入Excel，无需先收集到内存
                         per_day_filepath = None
                         saved_days_count = 0
-                        if is_per_day_sheet:
+                        if effective_per_day_sheet:
                             ensure_dirs()
                             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                             filename = f'{table_name}_{city}_{start_date}_{end_date}_{timestamp}.xlsx'
@@ -4534,16 +5709,67 @@ class UniversalExtractorGUI:
                                     current_dt += timedelta(days=1)
                                     continue
                                 
-                                self.update_progress_bar(
-                                    int((idx / total_tables) * 100) + 5, 
-                                    f"正在查询 {current_date_str}..."
-                                )
-                                
-                                df = self.extractor.jxcx.get_table(payload, to_df=True)
-                                
+                                # 检查是否是特殊报表（如4G语音小区需要分别获取多个表）
+                                if isinstance(payload, dict) and payload.get('__special__') == '4G_VOICE_MERGE':
+                                    self.log(f"  检测到4G语音小区报表，将分别获取VoLTE和EPSFB数据...", "INFO")
+                                    # 生成VoLTE和EPSFB的payload
+                                    volte_payload = get_volte_payload()
+                                    volte_payload = set_payload_time(volte_payload, current_date_str + ' 00:00:00', current_date_str + ' 23:59:59')
+                                    volte_payload = set_payload_city(volte_payload, city)
+
+                                    epsfb_payload = get_epsfb_payload()
+                                    epsfb_payload = set_payload_time(epsfb_payload, current_date_str + ' 00:00:00', current_date_str + ' 23:59:59')
+                                    epsfb_payload = set_payload_city(epsfb_payload, city)
+
+                                    voice_data = self.extractor.jxcx._get_4g_voice_table_internal(volte_payload, epsfb_payload)
+                                    volte_df = voice_data['volte']
+                                    epsfb_df = voice_data['epsfb']
+                                    merged_df = voice_data['merged']
+
+                                    # 4G语音小区：收集数据用于最后统一保存
+                                    if 'volte_dfs' not in locals():
+                                        volte_dfs = []
+                                        epsfb_dfs = []
+                                        merged_dfs = []
+                                    if not volte_df.empty:
+                                        volte_dfs.append(volte_df)
+                                    if not epsfb_df.empty:
+                                        epsfb_dfs.append(epsfb_df)
+                                    if not merged_df.empty:
+                                        merged_dfs.append(merged_df)
+
+                                    df = merged_df  # 用于后续判断是否为空
+                                else:
+                                    self.update_progress_bar(
+                                        int((idx / total_tables) * 100) + 5,
+                                        f"正在查询 {current_date_str}..."
+                                    )
+                                    df = self.extractor.jxcx.get_table(payload, to_df=True)
+
                                 if df.empty:
                                     self.log(f"  ⚠ {current_date_str}: 未查询到数据", "WARNING")
                                 else:
+                                    # 处理计算列
+                                    calc_columns = table_config.get('calc_columns', [])
+                                    if calc_columns:
+                                        try:
+                                            if '4G全程完好率' in calc_columns:
+                                                df = add_wanchenglv_columns(df, '4g')
+                                            elif '5G全程完好率' in calc_columns:
+                                                df = add_wanchenglv_columns(df, '5g')
+                                            elif '5G语音小区' in calc_columns:
+                                                df = add_5g_voice_columns(df)
+                                        except Exception as e:
+                                            import traceback
+                                            error_detail = traceback.format_exc()
+                                            self.log(f"  ⚠ 添加计算列异常: {e}", "WARNING")
+                                            self.log(f"  ⚠ 详细错误: {error_detail[:500]}", "WARNING")
+                                            # 打印DataFrame列信息帮助诊断
+                                            if not df.empty:
+                                                self.log(f"  ⚠ DataFrame列名: {list(df.columns)}", "WARNING")
+                                            else:
+                                                self.log(f"  ⚠ DataFrame为空，无法添加计算列", "WARNING")
+
                                     if is_per_day_sheet:
                                         # 按日分Sheet模式：查完即写，无需收集到内存
                                         sheet_name = current_date_str.replace('-', '')
@@ -4559,37 +5785,70 @@ class UniversalExtractorGUI:
                                 self.log(f"  ✗ [{current_date_str}] 提取异常: {e}", "ERROR")
                             
                             current_dt += timedelta(days=1)
-                        
+
+                        # 检查是否是4G语音小区（特殊处理）
+                        is_4g_voice_table = table_config.get('calc_columns', []) == ['4G语音小区']
+
                         # 按日分Sheet模式：清理并完成
-                        if is_per_day_sheet and saved_days_count > 0:
+                        if effective_per_day_sheet and saved_days_count > 0:
                             self.extractor._finalize_per_day_excel(per_day_filepath, saved_days_count)
                             self.log(f"  ✓ 按日分Sheet保存成功！共 {total_rows} 条记录，{saved_days_count} 个Sheet", "SUCCESS")
                             self.log(f"    文件已保存: {per_day_filepath}", "SUCCESS")
                             success_count += 1
-                        elif is_per_day_sheet and saved_days_count == 0:
+                        elif effective_per_day_sheet and saved_days_count == 0:
                             # 所有日期都无数据，删除空文件
                             if per_day_filepath and os.path.exists(per_day_filepath):
                                 os.remove(per_day_filepath)
                             self.log(f"  ⚠ 所有日期均未查询到数据", "WARNING")
                         elif all_dfs:
-                            # 合并模式：合并所有日期的数据并保存
-                            self.update_progress_bar(
-                                int(((idx + 0.8) / total_tables) * 100), 
-                                "正在合并并保存数据..."
-                            )
-                            
-                            combined_df = pd.concat(all_dfs, ignore_index=True)
-                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                            filename = f'{table_name}_{city}_{start_date}_{end_date}_{timestamp}.xlsx'
-                            filepath = self.extractor.save_to_excel(combined_df, filename)
-                            
-                            if filepath:
-                                self.log(f"  ✓ 多日数据合并成功！共 {total_rows} 条记录", "SUCCESS")
-                                self.log(f"    文件已保存: {filepath}", "SUCCESS")
-                                success_count += 1
+                            # 4G语音小区：统一保存为三个Sheet
+                            if is_4g_voice_table and 'volte_dfs' in locals() and volte_dfs:
+                                self.update_progress_bar(
+                                    int(((idx + 0.8) / total_tables) * 100),
+                                    "正在合并并保存4G语音小区数据..."
+                                )
+                                combined_volte = pd.concat(volte_dfs, ignore_index=True) if volte_dfs else pd.DataFrame()
+                                combined_epsfb = pd.concat(epsfb_dfs, ignore_index=True) if epsfb_dfs else pd.DataFrame()
+                                combined_merged = pd.concat(merged_dfs, ignore_index=True) if merged_dfs else pd.DataFrame()
+
+                                # 添加计算列
+                                if not combined_merged.empty:
+                                    try:
+                                        combined_merged = add_4g_voice_columns(combined_merged)
+                                    except Exception as e:
+                                        self.log(f"  ⚠ 添加计算列异常: {e}", "WARNING")
+
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                filename = f'{table_name}_{city}_{start_date}_{end_date}_{timestamp}.xlsx'
+                                filepath = self.extractor.save_4g_voice_to_excel(combined_volte, combined_epsfb, combined_merged, filename)
+
+                                total_rows = len(combined_volte) + len(combined_epsfb) + len(combined_merged)
+                                if filepath:
+                                    self.log(f"  ✓ 4G语音小区多日数据合并成功！共 {total_rows} 条记录", "SUCCESS")
+                                    self.log(f"    文件已保存: {filepath}", "SUCCESS")
+                                    success_count += 1
+                                else:
+                                    self.log(f"  ✗ 保存文件失败", "ERROR")
+                                    failed_count += 1
                             else:
-                                self.log(f"  ✗ 保存文件失败", "ERROR")
-                                failed_count += 1
+                                # 普通表：合并所有日期的数据并保存
+                                self.update_progress_bar(
+                                    int(((idx + 0.8) / total_tables) * 100),
+                                    "正在合并并保存数据..."
+                                )
+
+                                combined_df = pd.concat(all_dfs, ignore_index=True)
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                filename = f'{table_name}_{city}_{start_date}_{end_date}_{timestamp}.xlsx'
+                                filepath = self.extractor.save_to_excel(combined_df, filename)
+
+                                if filepath:
+                                    self.log(f"  ✓ 多日数据合并成功！共 {total_rows} 条记录", "SUCCESS")
+                                    self.log(f"    文件已保存: {filepath}", "SUCCESS")
+                                    success_count += 1
+                                else:
+                                    self.log(f"  ✗ 保存文件失败", "ERROR")
+                                    failed_count += 1
                         else:
                             self.log(f"  ⚠ 所有日期均未查询到数据", "WARNING")
                             
@@ -4610,22 +5869,84 @@ class UniversalExtractorGUI:
                             failed_count += 1
                             continue
 
-                        self.update_progress_bar(int((idx / total_tables) * 100) + 10, "正在查询数据...")
+                        # 检查是否是特殊报表（如4G语音小区需要分别获取多个表）
+                        if isinstance(payload, dict) and payload.get('__special__') == '4G_VOICE_MERGE':
+                            self.log(f"检测到4G语音小区报表，将分别获取VoLTE和EPSFB数据...", "INFO")
+                            # 生成VoLTE和EPSFB的payload
+                            volte_payload = get_volte_payload()
+                            volte_payload = set_payload_time(volte_payload, start_date + ' 00:00:00', end_date + ' 23:59:59')
+                            volte_payload = set_payload_city(volte_payload, city)
 
-                        df = self.extractor.jxcx.get_table(payload, to_df=True)
+                            epsfb_payload = get_epsfb_payload()
+                            epsfb_payload = set_payload_time(epsfb_payload, start_date + ' 00:00:00', end_date + ' 23:59:59')
+                            epsfb_payload = set_payload_city(epsfb_payload, city)
 
-                        if df.empty:
-                            self.log(f"⚠ 未查询到数据: {table_name}", "WARNING")
-                            continue
+                            self.update_progress_bar(int((idx / total_tables) * 100) + 10, "正在查询VoLTE数据...")
+                            self.log(f"正在获取VoLTE数据...", "INFO")
 
-                        self.update_progress_bar(int(((idx + 0.8) / total_tables) * 100), "正在保存数据...")
+                            # 使用新方法获取原始数据和合并数据
+                            voice_data = self.extractor.jxcx._get_4g_voice_table_internal(volte_payload, epsfb_payload)
+                            volte_df = voice_data['volte']
+                            epsfb_df = voice_data['epsfb']
+                            merged_df = voice_data['merged']
 
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        filename = f'{table_name}_{city}_{timestamp}.xlsx'
-                        filepath = self.extractor.save_to_excel(df, filename)
+                            if merged_df.empty:
+                                self.log(f"⚠ 未查询到数据: {table_name}", "WARNING")
+                                continue
+
+                            # 处理计算列（只在合并数据上计算）
+                            try:
+                                self.log(f"  正在添加计算列...", "INFO")
+                                merged_df = add_4g_voice_columns(merged_df)
+                            except Exception as e:
+                                self.log(f"  ⚠ 添加计算列异常: {e}", "WARNING")
+
+                            self.update_progress_bar(int(((idx + 0.8) / total_tables) * 100), "正在保存数据...")
+
+                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                            filename = f'{table_name}_{city}_{timestamp}.xlsx'
+                            filepath = self.extractor.save_4g_voice_to_excel(volte_df, epsfb_df, merged_df, filename)
+
+                            total_rows = len(volte_df) + len(epsfb_df) + len(merged_df)
+                        else:
+                            self.update_progress_bar(int((idx / total_tables) * 100) + 10, "正在查询数据...")
+                            df = self.extractor.jxcx.get_table(payload, to_df=True)
+
+                            if df.empty:
+                                self.log(f"⚠ 未查询到数据: {table_name}", "WARNING")
+                                continue
+
+                            # 处理计算列
+                            calc_columns = table_config.get('calc_columns', [])
+                            if calc_columns:
+                                try:
+                                    self.log(f"  正在添加计算列...", "INFO")
+                                    if '4G全程完好率' in calc_columns:
+                                        df = add_wanchenglv_columns(df, '4g')
+                                    elif '5G全程完好率' in calc_columns:
+                                        df = add_wanchenglv_columns(df, '5g')
+                                    elif '5G语音小区' in calc_columns:
+                                        df = add_5g_voice_columns(df)
+                                except Exception as e:
+                                    import traceback
+                                    error_detail = traceback.format_exc()
+                                    self.log(f"  ⚠ 添加计算列异常: {e}", "WARNING")
+                                    self.log(f"  ⚠ 详细错误: {error_detail[:500]}", "WARNING")
+                                    # 打印DataFrame列信息帮助诊断
+                                    if not df.empty:
+                                        self.log(f"  ⚠ DataFrame列名: {list(df.columns)}", "WARNING")
+                                    else:
+                                        self.log(f"  ⚠ DataFrame为空，无法添加计算列", "WARNING")
+
+                            self.update_progress_bar(int(((idx + 0.8) / total_tables) * 100), "正在保存数据...")
+
+                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                            filename = f'{table_name}_{city}_{timestamp}.xlsx'
+                            filepath = self.extractor.save_to_excel(df, filename)
+                            total_rows = len(df)
 
                         if filepath:
-                            self.log(f"✓ [{table_name}] 提取成功！共 {len(df)} 条记录", "SUCCESS")
+                            self.log(f"✓ [{table_name}] 提取成功！共 {total_rows} 条记录", "SUCCESS")
                             self.log(f"  文件已保存: {filepath}", "SUCCESS")
                             success_count += 1
                         else:
@@ -4763,76 +6084,220 @@ class UniversalExtractorGUI:
 # 新授权方式：仅使用到期日期，移除机器码绑定
 # 软件超过到期日期不能打开，但修改系统时间可打开但不能查询超过到期日期的数据
 
-def show_request_dialog(expiry_time_str):
-    """显示验证请求弹窗"""
+def show_machine_code_dialog(machine_code):
+    """显示机器码弹窗，供用户复制发给管理员"""
     import tkinter as tk
     from tkinter import ttk
-    
+
     root = tk.Tk()
-    root.title("授权验证请求")
-    root.geometry("450x250")
+    root.title("机器码 - 未授权")
+    root.geometry("550x320")
     root.resizable(False, False)
-    
+
     # 居中显示
     root.update_idletasks()
-    x = (root.winfo_screenwidth() // 2) - (450 // 2)
-    y = (root.winfo_screenheight() // 2) - (250 // 2)
-    root.geometry(f"450x250+{x}+{y}")
-    
-    main_frame = ttk.Frame(root, padding="25")
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = (screen_width - 550) // 2
+    y = (screen_height - 320) // 2
+    root.geometry(f"550x320+{x}+{y}")
+
+    main_frame = ttk.Frame(root, padding="20")
     main_frame.pack(fill=tk.BOTH, expand=True)
-    
+
+    # 标题
+    ttk.Label(main_frame, text="当前机器未授权",
+              font=("Microsoft YaHei UI", 14, "bold"),
+              foreground="#D32F2F").pack(pady=(0, 10))
+
+    # 提示信息
+    ttk.Label(main_frame, text="您的机器码如下，请复制后发给管理员添加到授权列表：",
+              font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(0, 5))
+
+    # 机器码文本框（可复制）
+    text_frame = ttk.Frame(main_frame)
+    text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+    machine_text = tk.Text(text_frame, height=4, font=("Courier New", 11), wrap=tk.WORD,
+                           bg="#F5F5F5", fg="#333333")
+    machine_text.insert("1.0", machine_code)
+    machine_text.config(state=tk.DISABLED)  # 只读但可复制
+    machine_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=machine_text.yview)
+    machine_text.config(yscrollcommand=machine_scroll.set)
+    machine_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    machine_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # 复制按钮
+    def copy_to_clipboard():
+        root.clipboard_clear()
+        root.clipboard_append(machine_code)
+        copy_btn.config(text="已复制!", state=tk.DISABLED)
+        root.after(2000, lambda: copy_btn.config(text="复制机器码", state=tk.NORMAL))
+
+    button_frame = ttk.Frame(main_frame)
+    button_frame.pack(fill=tk.X, pady=(15, 0))
+
+    copy_btn = ttk.Button(button_frame, text="复制机器码", command=copy_to_clipboard)
+    copy_btn.pack(side=tk.LEFT, padx=5)
+
+    exit_btn = ttk.Button(button_frame, text="退出程序", command=root.destroy)
+    exit_btn.pack(side=tk.LEFT, padx=5)
+
+    root.mainloop()
+
+
+def show_request_dialog(expiry_time_str, reason="授权不可用", machine_code=""):
+    """显示验证请求弹窗
+
+    Args:
+        expiry_time_str: 到期日期字符串
+        reason: 失败原因（"授权已过期" 或 "机器码不匹配"）
+        machine_code: 当前机器码，用于显示
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("授权验证请求")
+    root.geometry("550x420")
+    root.resizable(False, False)
+
+    # 居中显示
+    root.update_idletasks()
+    x = (root.winfo_screenwidth() // 2) - (275)
+    y = (root.winfo_screenheight() // 2) - (210)
+    root.geometry(f"550x420+{x}+{y}")
+
+    main_frame = ttk.Frame(root, padding="20")
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
     # 警告图标
     ttk.Label(main_frame, text="⚠️", font=("Arial", 32)).pack(pady=(0, 15))
-    
-    # 标题
-    ttk.Label(main_frame, text="授权已过期",
-              font=("Microsoft YaHei UI", 14, "bold"), 
+
+    # 标题（根据原因显示不同标题）
+    title_text = "授权已过期" if reason == "授权已过期" else "授权验证失败"
+    ttk.Label(main_frame, text=title_text,
+              font=("Microsoft YaHei UI", 14, "bold"),
               foreground="#D32F2F").pack(pady=(0, 10))
-    
+
     # 到期日期信息
-    ttk.Label(main_frame, text=f"到期日期: {expiry_time_str}",
+    if expiry_time_str:
+        ttk.Label(main_frame, text=f"到期日期: {expiry_time_str}",
+                  font=("Microsoft YaHei UI", 10),
+                  foreground="#666666").pack(pady=(0, 5))
+
+    # 失败原因
+    ttk.Label(main_frame, text=reason,
               font=("Microsoft YaHei UI", 10),
-              foreground="#666666").pack(pady=(0, 5))
-    
+              foreground="#666666").pack(pady=(5, 10))
+
+    # 机器码信息
+    if machine_code:
+        ttk.Label(main_frame, text="您的机器码（发给管理员）：",
+                  font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(5, 5))
+
+        text_frame = ttk.Frame(main_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        machine_text = tk.Text(text_frame, height=3, font=("Courier New", 10), wrap=tk.WORD,
+                              bg="#F5F5F5", fg="#333333")
+        machine_text.insert("1.0", machine_code)
+        machine_text.config(state=tk.DISABLED)
+        machine_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=machine_text.yview)
+        machine_text.config(yscrollcommand=machine_scroll.set)
+        machine_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        machine_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def copy_to_clipboard():
+            root.clipboard_clear()
+            root.clipboard_append(machine_code)
+            copy_btn.config(text="已复制!", state=tk.DISABLED)
+            root.after(2000, lambda: copy_btn.config(text="复制机器码", state=tk.NORMAL))
+
+        copy_btn = ttk.Button(main_frame, text="复制机器码", command=copy_to_clipboard)
+        copy_btn.pack(pady=(5, 0))
+
     # 提示信息
     ttk.Label(main_frame, text="请联系管理员获取新的授权",
               font=("Microsoft YaHei UI", 11),
-              wraplength=380, justify="center").pack(pady=(10, 0))
-    
+              wraplength=480, justify="center").pack(pady=(10, 0))
+
     # 确定按钮
     ttk.Button(main_frame, text="确定", command=root.destroy).pack(pady=(20, 0))
-    
+
     root.mainloop()
 
 
 def verify_license():
-    """验证授权，返回 (is_valid, error_msg, expiry_time)
-    
-    新逻辑：
-    - 如果到期日期已过期，显示验证请求弹窗，返回 (False, 错误信息, 到期日期)
-    - 如果到期日期未过期，返回 (True, None, 过期时间)
+    """验证授权，返回 (is_valid, error_msg, expiry_time, machine_code)
+
+    逻辑：
+    1. 检查 license.dat 是否存在，不存在则显示机器码弹窗并退出
+    2. 读取 license.dat 中的机器码，与当前机器码比对
+    3. 检查系统时间是否超过 EXPIRY_DATE
     """
     print("[DEBUG] 开始授权验证...")
+
+    # 生成当前机器码
+    current_machine_code = generate_machine_code(get_hw_info())
+    print(f"[DEBUG] 当前机器码: {current_machine_code}")
     print(f"[DEBUG] 授权到期日期: {EXPIRY_DATE}")
+
+    # 检查 license.dat 是否存在
+    if not os.path.exists(LICENSE_FILE):
+        print("[ERROR] 未找到 license.dat 文件")
+        show_machine_code_dialog(current_machine_code)
+        return False, "未找到授权文件（license.dat），请联系管理员获取", None, current_machine_code
+
+    # 读取 license.dat 中的机器码
+    try:
+        with open(LICENSE_FILE, "rb") as f:
+            license_data = f.read()
+
+        # 尝试解析为有签名格式：SN长度(4字节) + SN + "|" + 签名
+        if len(license_data) > 4:
+            try:
+                sn_len = struct.unpack(">I", license_data[:4])[0]
+                if sn_len == 64 and len(license_data) > 4 + sn_len + 1:
+                    stored_machine_code = license_data[4:4 + sn_len].decode("utf-8")
+                else:
+                    stored_machine_code = license_data.decode("utf-8").split("|")[0]
+            except:
+                # 简单格式：纯机器码
+                stored_machine_code = license_data.decode("utf-8").strip()
+        else:
+            stored_machine_code = license_data.decode("utf-8").strip()
+
+        print(f"[DEBUG] license.dat 中的机器码: {stored_machine_code}")
+
+    except Exception as e:
+        print(f"[ERROR] 读取 license.dat 失败: {e}")
+        show_machine_code_dialog(current_machine_code)
+        return False, "授权文件读取失败，请联系管理员", None, current_machine_code
+
+    # 检查机器码是否匹配
+    if stored_machine_code != current_machine_code:
+        print("[ERROR] 机器码不匹配")
+        show_request_dialog(EXPIRY_DATE, "机器码不匹配", current_machine_code)
+        return False, "机器码不匹配，此授权文件不适用于当前机器", None, current_machine_code
 
     # 检查是否过期
     try:
         expiry_time = datetime.strptime(EXPIRY_DATE, "%Y-%m-%d")
     except ValueError:
         print("[ERROR] 授权日期格式错误")
-        return False, "授权日期格式错误，请检查 EXPIRY_DATE 格式（应为 YYYY-MM-DD）", None
+        return False, "授权日期格式错误，请检查 EXPIRY_DATE 格式（应为 YYYY-MM-DD）", None, current_machine_code
 
     current_time = datetime.now()
     today = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
 
     if today > expiry_time:
         print("[WARNING] 授权已过期，显示验证请求...")
-        show_request_dialog(EXPIRY_DATE)
-        return False, f"授权已过期（到期日期: {EXPIRY_DATE}）", EXPIRY_DATE
+        show_request_dialog(EXPIRY_DATE, "授权已过期", current_machine_code)
+        return False, f"授权已过期（到期日期: {EXPIRY_DATE}）", EXPIRY_DATE, current_machine_code
 
     print("[SUCCESS] 授权验证通过")
-    return True, None, EXPIRY_DATE  # 未过期
+    return True, None, EXPIRY_DATE, current_machine_code
 
 
 def main():
@@ -4840,16 +6305,16 @@ def main():
     import tkinter as tk
     print("[MAIN] 程序启动")
     ensure_dirs()
-    
+
     # 授权验证
-    is_valid, error_msg, expiry_time = verify_license()
+    is_valid, error_msg, expiry_time, machine_code = verify_license()
     print(f"[MAIN] 验证完成: is_valid={is_valid}")
-    
+
     if not is_valid:
-        # 授权失败（已过期或无授权文件），弹窗已在 verify_license 中显示
+        # 授权失败（机器码未授权或已过期），弹窗已在 verify_license 中显示
         print("[MAIN] 授权验证失败，退出程序")
         sys.exit(1)
-    
+
     # 授权通过，打开软件
     root = tk.Tk()
     app = UniversalExtractorGUI(root, expiry_time=expiry_time)
