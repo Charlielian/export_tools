@@ -17,7 +17,7 @@ jobs:
     - name: Set up Python 3.13
       uses: actions/setup-python@v6
       with:
-        python-version: '3.13'
+        python-version: '3.13'  # 已改为 3.13
 
     - name: Install dependencies
       run: |
@@ -46,13 +46,13 @@ paths:
 
 server:
   base_url: 'https://nqi.gmcc.net:20443'
-"@ 
-        Out-File -FilePath "config.yaml" -Encoding utf8
+"@
+          Out-File -FilePath "config.yaml" -Encoding utf8
         }
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx universal_extractor_gui.py
+        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;." universal_extractor_gui.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v6
