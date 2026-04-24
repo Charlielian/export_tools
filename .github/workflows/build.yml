@@ -10,15 +10,15 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - uses: actions/checkout@v5
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v6
       with:
-        python-version: '3.13'
-    
+        python-version: '3.13'  # 已改为 3.13
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -26,7 +26,7 @@ jobs:
           pip install -r requirements.txt
         }
         pip install pyinstaller
-    
+
     - name: Create config.yaml if not exists
       run: |
         if (!(Test-Path "config.yaml")) {
@@ -51,10 +51,10 @@ server:
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;" universal_extractor_gui.py
+        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;." universal_extractor_gui.py
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: universal-extractor-exe
         path: dist/universal_extractor_gui.exe
