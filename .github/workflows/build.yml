@@ -10,15 +10,12 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    # 强制使用 Node.js 24，消除 GitHub 弃用警告
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Set up Python 3.13
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.13'  # 已改为 3.13
 
@@ -35,7 +32,7 @@ jobs:
         pyinstaller --onefile --windowed --name universal_extractor_gui --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;." universal_extractor_gui.py
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: universal-extractor-exe
         path: dist/universal_extractor_gui.exe
