@@ -1,0 +1,41 @@
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# Python文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+env/
+pyvenv/
+
+# 日志文件
+logs/
+*.log
+
+# 数据输出
+captcha_images/
+cookies/
+data_output/
+
+# 浏览器数据
+浏览器01/
+浏览器日志/
+
+# 授权文件
+license.dat
+
+# 配置文件
+config.yaml
+
+# 其他
+12333.txt
+1222111.txt
+1222221.txt
+.license_time
+
+# 授权工具私钥
+授权工具/private_key.pem
