@@ -30,7 +30,7 @@ jobs:
     - name: Create config.yaml if not exists
       run: |
         if (!(Test-Path "config.yaml")) {
-          @"
+          $config = @'
 # 配置文件 - 请根据实际情况修改以下内容
 # 打包后，用户可以将此文件放在 EXE 同目录下覆盖默认配置
 
@@ -46,8 +46,8 @@ paths:
 
 server:
   base_url: 'https://nqi.gmcc.net:20443'
-"@
-          Out-File -FilePath "config.yaml" -Encoding utf8
+'@
+          $config | Out-File -FilePath "config.yaml" -Encoding utf8
         }
 
     - name: Build EXE
