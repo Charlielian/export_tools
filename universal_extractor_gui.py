@@ -1120,6 +1120,7 @@ class JXCXQuery:
         Returns:
             dict: {'volte': DataFrame, 'epsfb': DataFrame, 'merged': DataFrame}
         """
+        import numpy as np
         result = {'volte': pd.DataFrame(), 'epsfb': pd.DataFrame(), 'merged': pd.DataFrame()}
 
         if not self.enabled:
@@ -1193,7 +1194,7 @@ class JXCXQuery:
             return result
 
         # 5. 确定VoLTE和EPSFB各自的特有字段
-        common_cols = set(['时间', '小区', '地市', '责任网格', '区县', '小区名称', 'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name'])
+        common_cols = set(['时间', '小区', '地市', '责任网格', '区县', 'starttime', 'city', 'cgi', 'grid', 'area', 'nrcell_name'])
 
         # VoLTE特有字段（英文 volta_ 或中文 VoLTE 开头，但排除公共字段）
         volte_cols = [c for c in volte_df.columns if (c.startswith('volte_') or 'VoLTE' in c) and c not in common_cols]
@@ -1204,13 +1205,21 @@ class JXCXQuery:
         print(f"[DEBUG-4G-VOICE] EPSFB特有字段: {epsfb_cols}")
 
         # 6. 准备合并数据
-        # VoLTE: 合并键 + VoLTE特有字段
+        # VoLTE: 合并键 + VoLTE特有字段 + 小区名称（优先使用）
         volte_merge_cols = [c for c in merge_keys if c in volte_df.columns] + [c for c in volte_cols if c in volte_df.columns]
+        # 只在VoLTE表中保留小区名称（优先来源）
+        if '小区名称' in volte_df.columns:
+            volte_merge_cols.append('小区名称')
         volte_for_merge = volte_df[volte_merge_cols].copy()
 
-        # EPSFB: 合并键 + EPSFB特有字段
+        # EPSFB: 合并键 + EPSFB特有字段 + 小区名称（备用来源）
         epsfb_merge_cols = [c for c in merge_keys if c in epsfb_df.columns] + [c for c in epsfb_cols if c in epsfb_df.columns]
+        if '小区名称' in epsfb_df.columns:
+            epsfb_merge_cols.append('小区名称')
         epsfb_for_merge = epsfb_df[epsfb_merge_cols].copy()
+        # 重命名EPSFB的小区名称列，避免与VoLTE冲突
+        if '小区名称' in epsfb_for_merge.columns:
+            epsfb_for_merge = epsfb_for_merge.rename(columns={'小区名称': '小区名称_epsfb'})
 
         # 7. 执行合并（outer join，保留两边的数据）
         if not merge_keys:
@@ -1218,8 +1227,27 @@ class JXCXQuery:
         else:
             merged_df = pd.merge(volte_for_merge, epsfb_for_merge, on=merge_keys, how='outer')
 
+        # 8. 补充小区名称：优先用VoLTE的，NaN时用EPSFB的
+        if '小区名称_epsfb' in merged_df.columns:
+            if '小区名称' not in merged_df.columns:
+                merged_df['小区名称'] = merged_df['小区名称_epsfb']
+            else:
+                # VoLTE小区名称为NaN时，用EPSFB的补充
+                merged_df['小区名称'] = merged_df['小区名称'].fillna(merged_df['小区名称_epsfb'])
+            merged_df = merged_df.drop(columns=['小区名称_epsfb'])
+            print(f"[DEBUG-4G-VOICE] 小区名称已补充（VoLTE优先，EPSFB备用）")
+
         # 清理可能的空列
         merged_df = merged_df.dropna(axis=1, how='all')
+
+        # 调整列顺序：将小区名称列移到小区列的后面
+        cols = list(merged_df.columns)
+        if '小区名称' in cols and '小区' in cols:
+            cols.remove('小区名称')
+            xiaoqu_idx = cols.index('小区')
+            cols.insert(xiaoqu_idx + 1, '小区名称')
+            merged_df = merged_df[cols]
+            print(f"[DEBUG-4G-VOICE] 已将小区名称列移到小区列后面")
 
         print(f"[SUCCESS-4G-VOICE] 合并完成，最终数据: {len(merged_df)} 行, {len(merged_df.columns)} 列")
         print(f"[DEBUG-4G-VOICE] 合并后列名: {list(merged_df.columns)}")
@@ -3539,14 +3567,23 @@ def add_wanchenglv_columns(df, report_type='4g'):
         # 简化为: 4G无线接通率 * 4G切换成功率 * (100 - 4GE-RAB掉线率) / 10000
         # 当任一分量为0或nan时，默认视为1，避免除0错误
         print("[DEBUG-WANCHENGLV] >> 计算4G全程完好率...")
+        
+        # 确保所有中间列都是数值类型
+        df['4G无线接通率(%)'] = pd.to_numeric(df['4G无线接通率(%)'], errors='coerce')
+        df['4G切换成功率(%)'] = pd.to_numeric(df['4G切换成功率(%)'], errors='coerce')
+        df['4GE-RAB掉线率'] = pd.to_numeric(df['4GE-RAB掉线率'], errors='coerce')
+        
         wanchenglv_factor = safe_value(df['4G无线接通率(%)']) * safe_value(df['4G切换成功率(%)']) * safe_value(100 - df['4GE-RAB掉线率'])
         
+        # 确保结果也是数值类型
+        wanchenglv_factor = pd.to_numeric(wanchenglv_factor, errors='coerce')
+        
         # 检查是否有inf或nan
-        inf_count = np.isinf(wanchenglv_factor).sum()
-        nan_count_factor = np.isnan(wanchenglv_factor).sum()
+        inf_count = np.isinf(wanchenglv_factor.astype(float)).sum()
+        nan_count_factor = np.isnan(wanchenglv_factor.astype(float)).sum()
         print(f"[DEBUG-WANCHENGLV]   wanchenglv_factor统计: inf={inf_count}, nan={nan_count_factor}")
         if inf_count > 0:
-            inf_rows = df.index[np.isinf(wanchenglv_factor)].tolist()
+            inf_rows = df.index[np.isinf(wanchenglv_factor.astype(float))].tolist()
             print(f"[DEBUG-WANCHENGLV]   !!! 发现inf值! 行: {inf_rows[:10]}")
         
         # 当所有中间指标都是NaN时，最终结果也应该是NaN
@@ -3557,11 +3594,18 @@ def add_wanchenglv_columns(df, report_type='4g'):
         
         df['4G全程完好率'] = np.where(all_valid, wanchenglv_factor / 10000, np.nan)
         
+        # 4G差小区判定：全程完好率<95% 且 RRC连接建立请求次数>1000
+        df['4G是否差小区'] = np.where(
+            (df['4G全程完好率'] < 95) & (df['RRC连接建立请求次数'] > 1000),
+            '是', '否'
+        )
+        
         # 最终检查
-        final_inf = np.isinf(df['4G全程完好率']).sum()
+        final_inf = np.isinf(pd.to_numeric(df['4G全程完好率'], errors='coerce')).sum()
         final_nan = df['4G全程完好率'].isna().sum()
         final_valid = df['4G全程完好率'].notna().sum()
         print(f"[DEBUG-WANCHENGLV]   4G全程完好率最终结果: 有效={final_valid}, NaN={final_nan}, inf={final_inf}")
+        print(f"[DEBUG-WANCHENGLV]   4G差小区统计: {df['4G是否差小区'].value_counts().to_dict()}")
         
     else:
         # 5G全程完好率计算
@@ -3675,14 +3719,23 @@ def add_wanchenglv_columns(df, report_type='4g'):
         # 简化为: SA无线接通率 * SA切换成功率 * (100 - SA无线掉线率) / 10000
         # 当任一分量为0或nan时，默认视为1，避免除0错误
         print("[DEBUG-WANCHENGLV] >> 计算5G全程完好率...")
+        
+        # 确保所有中间列都是数值类型
+        df['SA无线接通率%'] = pd.to_numeric(df['SA无线接通率%'], errors='coerce')
+        df['SA切换成功率%'] = pd.to_numeric(df['SA切换成功率%'], errors='coerce')
+        df['SA无线掉线率%'] = pd.to_numeric(df['SA无线掉线率%'], errors='coerce')
+        
         wanchenglv_factor = safe_value(df['SA无线接通率%']) * safe_value(df['SA切换成功率%']) * safe_value(100 - df['SA无线掉线率%'])
         
+        # 确保结果也是数值类型
+        wanchenglv_factor = pd.to_numeric(wanchenglv_factor, errors='coerce')
+        
         # 检查是否有inf或nan
-        inf_count = np.isinf(wanchenglv_factor).sum()
-        nan_count_factor = np.isnan(wanchenglv_factor).sum()
+        inf_count = np.isinf(wanchenglv_factor.astype(float)).sum()
+        nan_count_factor = np.isnan(wanchenglv_factor.astype(float)).sum()
         print(f"[DEBUG-WANCHENGLV]   wanchenglv_factor统计: inf={inf_count}, nan={nan_count_factor}")
         if inf_count > 0:
-            inf_rows = df.index[np.isinf(wanchenglv_factor)].tolist()
+            inf_rows = df.index[np.isinf(wanchenglv_factor.astype(float))].tolist()
             print(f"[DEBUG-WANCHENGLV]   !!! 发现inf值! 行: {inf_rows[:10]}")
         
         # 当所有中间指标都是NaN时，最终结果也应该是NaN
@@ -3693,11 +3746,18 @@ def add_wanchenglv_columns(df, report_type='4g'):
         
         df['5G全程完好率'] = np.where(all_valid, wanchenglv_factor / 10000, np.nan)
         
+        # 5G差小区判定：全程完好率<95% 且 RRC连接建立请求次数>1000
+        df['5G是否差小区'] = np.where(
+            (df['5G全程完好率'] < 95) & (df['RRC连接建立请求次数'] > 1000),
+            '是', '否'
+        )
+        
         # 最终检查
-        final_inf = np.isinf(df['5G全程完好率']).sum()
+        final_inf = np.isinf(pd.to_numeric(df['5G全程完好率'], errors='coerce')).sum()
         final_nan = df['5G全程完好率'].isna().sum()
         final_valid = df['5G全程完好率'].notna().sum()
         print(f"[DEBUG-WANCHENGLV]   5G全程完好率最终结果: 有效={final_valid}, NaN={final_nan}, inf={final_inf}")
+        print(f"[DEBUG-WANCHENGLV]   5G差小区统计: {df['5G是否差小区'].value_counts().to_dict()}")
     
     print("[DEBUG-WANCHENGLV] ========== 计算完成 ==========")
     return df
@@ -4519,13 +4579,13 @@ class TableConfig:
         '4G全程完好率报表': {
             'payload_func': get_4g_wanchenglv_payload,
             'use_interference_filter': False,
-            'calc_columns': ['4G全程完好率'],
+            'calc_columns': ['4G全程完好率', '4G是否差小区'],
             'description': '4G全程完好率报表'
         },
         '5G全程完好率报表': {
             'payload_func': get_5g_wanchenglv_payload,
             'use_interference_filter': False,
-            'calc_columns': ['5G全程完好率'],
+            'calc_columns': ['5G全程完好率', '5G是否差小区'],
             'description': '5G全程完好率报表'
         },
         '4G语音小区': {
@@ -4741,6 +4801,7 @@ class UniversalExtractorGUI:
         self.log_queue = queue.Queue()
         self.extractor = None
         self.is_logged_in = False
+        self.is_stopping = False
 
         self.create_widgets()
         self.root.update_idletasks()
@@ -4885,17 +4946,26 @@ class UniversalExtractorGUI:
         # 第一行：登录配置卡片（单行紧凑）
         self._build_login_card(content)
 
-        # 第二行：查询参数卡片
-        self._build_query_card(content)
+        # 第二行：查询参数 + 提取参数（左右分布）
+        params_row = tk.Frame(content, bg='#f9fafb')
+        params_row.pack(fill=tk.X, pady=(0, 10))
 
-        # 第三行：提取参数卡片
-        self._build_params_card(content)
+        # 左侧：查询参数卡片
+        self._build_query_card(params_row)
+
+        # 右侧：提取参数卡片
+        self._build_params_card(params_row)
 
         # 底部：进度和日志
         self._build_bottom_section(content)
 
-    def _build_card(self, parent, title, **kwargs):
-        """创建卡片容器"""
+    def _build_card(self, parent, title=None, **kwargs):
+        """创建卡片容器
+        Args:
+            parent: 父容器
+            title: 卡片标题（可选）
+            compact: 是否紧凑模式（无标题边框）
+        """
         card = tk.Frame(parent, bg='white', bd=0, relief='flat')
 
         if title:
@@ -4913,120 +4983,42 @@ class UniversalExtractorGUI:
         return card
 
     def _build_query_card(self, parent):
-        """构建查询参数卡片"""
+        """构建查询参数卡片（紧凑布局）"""
         card = self._build_card(parent, "🔍 查询参数")
-        card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
         body = tk.Frame(card, bg='white')
         body.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
 
-        top_row = tk.Frame(body, bg='white')
-        top_row.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        # ========== 数据分类（横向排列）==========
+        cat_frame = tk.Frame(body, bg='white')
+        cat_frame.pack(fill=tk.X, pady=(0, 8))
 
-        # ========== 左侧：数据分类（带滚动条）==========
-        cat_outer = tk.Frame(top_row, bg='#f8f9fa', bd=1)
-        cat_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 15))
-
-        tk.Label(cat_outer, text="数据分类", font=('Microsoft YaHei UI', 10, 'bold'),
-                bg='#f8f9fa', fg='#202124', padx=12, pady=8).pack(anchor='w')
-
-        # 创建可滚动区域
-        cat_scroll_frame = tk.Frame(cat_outer, bg='#f8f9fa')
-        cat_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        cat_canvas = tk.Canvas(cat_scroll_frame, bg='#f8f9fa', highlightthickness=0,
-                               height=150)
-        cat_scrollbar = ttk.Scrollbar(cat_scroll_frame, orient=tk.VERTICAL,
-                                      command=cat_canvas.yview)
-        cat_canvas.configure(yscrollcommand=cat_scrollbar.set)
-
-        cat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        cat_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        cat_inner = tk.Frame(cat_canvas, bg='#f8f9fa')
-        cat_canvas.create_window((0, 0), window=cat_inner, anchor='nw')
-
-        def on_cat_configure(event):
-            cat_canvas.configure(scrollregion=cat_canvas.bbox('all'))
-
-        cat_inner.bind('<Configure>', on_cat_configure)
-
-        # 鼠标滚轮支持（跨平台）
-        def on_cat_mousewheel(event):
-            cat_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def on_cat_bound_to_mousewheel(event):
-            cat_canvas.bind_all('<MouseWheel>', on_cat_mousewheel)
-
-        def on_cat_unbound_to_mousewheel(event):
-            cat_canvas.unbind_all('<MouseWheel>')
-
-        cat_canvas.bind('<Enter>', on_cat_bound_to_mousewheel)
-        cat_canvas.bind('<Leave>', on_cat_unbound_to_mousewheel)
+        tk.Label(cat_frame, text="数据分类：", font=('Microsoft YaHei UI', 9, 'bold'),
+                bg='white', fg='#5f6368').pack(side=tk.LEFT, padx=(0, 6))
 
         self.category_vars = {}
-        categories = [
-            ("干扰", False),
-            ("容量", False),
-            ("语音报表", False),
-            ("小区性能", False),
-            ("全程完好率", False),
-            ("语音小区", False)
-        ]
+        categories = ["干扰", "容量", "语音报表", "小区性能", "全程完好率", "语音小区"]
 
-        for name, checked in categories:
-            var = tk.IntVar(value=int(checked))
+        for name in categories:
+            var = tk.IntVar(value=0)
             self.category_vars[name] = var
-            cb = tk.Checkbutton(cat_inner, text=name, variable=var,
-                               font=('Microsoft YaHei UI', 10, 'bold'),
-                               bg='#f8f9fa', fg='#202124',
-                               selectcolor='#165DFF',
-                               activebackground='#f8f9fa',
-                               activeforeground='#165DFF',
-                               cursor='hand2',
-                               command=lambda c=name: self._on_category_changed(c))
-            cb.pack(anchor='w', pady=2)
+            cb = tk.Checkbutton(cat_frame, text=name, variable=var,
+                              font=('Microsoft YaHei UI', 9, 'bold'),
+                              bg='white', fg='#202124',
+                              selectcolor='#165DFF',
+                              activebackground='white',
+                              activeforeground='#165DFF',
+                              cursor='hand2',
+                              command=lambda c=name: self._on_category_changed(c))
+            cb.pack(side=tk.LEFT, padx=(0, 8))
 
-        # ========== 右侧：数据表选择（带滚动条）==========
-        table_outer = tk.Frame(top_row, bg='#f8f9fa', bd=1)
-        table_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # ========== 数据表选择（下拉框）==========
+        table_frame = tk.Frame(body, bg='white')
+        table_frame.pack(fill=tk.X, pady=(0, 8))
 
-        tk.Label(table_outer, text="选择数据表", font=('Microsoft YaHei UI', 10, 'bold'),
-                bg='#f8f9fa', fg='#202124', padx=12, pady=8).pack(anchor='w')
-
-        # 创建可滚动区域
-        table_scroll_frame = tk.Frame(table_outer, bg='#f8f9fa')
-        table_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        table_canvas = tk.Canvas(table_scroll_frame, bg='#f8f9fa', highlightthickness=0,
-                                 height=150)
-        table_scrollbar = ttk.Scrollbar(table_scroll_frame, orient=tk.VERTICAL,
-                                        command=table_canvas.yview)
-        table_canvas.configure(yscrollcommand=table_scrollbar.set)
-
-        table_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        table_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        tables_grid = tk.Frame(table_canvas, bg='#f8f9fa')
-        table_canvas.create_window((0, 0), window=tables_grid, anchor='nw')
-
-        def on_table_configure(event):
-            table_canvas.configure(scrollregion=table_canvas.bbox('all'))
-
-        tables_grid.bind('<Configure>', on_table_configure)
-
-        # 鼠标滚轮支持（跨平台）
-        def on_table_mousewheel(event):
-            table_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def on_table_bound_to_mousewheel(event):
-            table_canvas.bind_all('<MouseWheel>', on_table_mousewheel)
-
-        def on_table_unbound_to_mousewheel(event):
-            table_canvas.unbind_all('<MouseWheel>')
-
-        table_canvas.bind('<Enter>', on_table_bound_to_mousewheel)
-        table_canvas.bind('<Leave>', on_table_unbound_to_mousewheel)
+        tk.Label(table_frame, text="选择数据表：", font=('Microsoft YaHei UI', 9, 'bold'),
+                bg='white', fg='#5f6368').pack(side=tk.LEFT, padx=(0, 6))
 
         self.table_vars = {}
         TABLE_CATEGORIES = {
@@ -5042,28 +5034,17 @@ class UniversalExtractorGUI:
         for tables in TABLE_CATEGORIES.values():
             all_tables.extend(tables)
 
-        for i, name in enumerate(all_tables):
-            var = tk.IntVar(value=1 if i < 2 else 0)
-            self.table_vars[name] = var
-            cb = tk.Checkbutton(tables_grid, text=name, variable=var,
-                               font=('Microsoft YaHei UI', 10),
-                               bg='#f8f9fa', fg='#202124',
-                               selectcolor='#165DFF',
-                               activebackground='#f8f9fa',
-                               activeforeground='#165DFF',
-                               cursor='hand2')
-            row, col = i // 3, i % 3
-            cb.grid(row=row, column=col, sticky='w', padx=(0, 25), pady=2)
+        for name in all_tables:
+            self.table_vars[name] = tk.IntVar(value=0)
 
-        # 全选按钮
-        btn_frame = tk.Frame(table_outer, bg='#f8f9fa')
-        btn_frame.pack(fill=tk.X, padx=8, pady=(8, 8))
-        tk.Button(btn_frame, text="全选", font=('Microsoft YaHei UI', 9, 'bold'),
-                 bg='#e8eaed', fg='#202124', bd=0, padx=14, pady=4,
-                 cursor='hand2', command=self._select_all_tables).pack(side=tk.LEFT, padx=(0, 5))
-        tk.Button(btn_frame, text="取消", font=('Microsoft YaHei UI', 9, 'bold'),
-                 bg='#e8eaed', fg='#202124', bd=0, padx=14, pady=4,
-                 cursor='hand2', command=self._deselect_all_tables).pack(side=tk.LEFT)
+        # 使用下拉框选择数据表
+        self.table_dropdown = MultiSelectDropdown(
+            table_frame,
+            all_tables,
+            width=22,
+            select_all=False
+        )
+        self.table_dropdown.pack(pady=(2, 0))
 
     def _build_login_card(self, parent):
         """构建登录配置卡片（一行紧凑布局）"""
@@ -5118,14 +5099,14 @@ class UniversalExtractorGUI:
         self.login_btn.pack(side=tk.LEFT)
 
     def _build_params_card(self, parent):
-        """构建提取参数卡片（紧凑布局）"""
+        """构建提取参数卡片（紧凑布局，右侧显示）"""
         card = self._build_card(parent, "⚙ 提取参数")
-        card.pack(fill=tk.X, pady=(0, 10))
+        card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
 
         body = tk.Frame(card, bg='white')
-        body.pack(fill=tk.X, padx=16, pady=8)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
 
-        # 第一行：地市选择 + 快捷日期 + 日期范围
+        # 第一行：地市选择 + 快捷日期（水平排列）
         top_row = tk.Frame(body, bg='white')
         top_row.pack(fill=tk.X, pady=(0, 6))
 
@@ -5162,8 +5143,12 @@ class UniversalExtractorGUI:
             btn.pack(side=tk.LEFT, padx=(0, 3))
             self.quick_date_btns[days] = btn
 
+        # 第二行：日期范围（单独一行）
+        date_row = tk.Frame(body, bg='white')
+        date_row.pack(fill=tk.X, pady=(0, 6))
+
         # 日期范围
-        date_frame = tk.Frame(top_row, bg='white')
+        date_frame = tk.Frame(date_row, bg='white')
         date_frame.pack(side=tk.LEFT, padx=(0, 15))
         tk.Label(date_frame, text="日期范围", font=('Microsoft YaHei UI', 8),
                 bg='white', fg='#5f6368').pack(anchor='w')
@@ -5218,8 +5203,11 @@ class UniversalExtractorGUI:
                    values=list(range(1, 32)),
                    width=2, state="readonly").pack(side=tk.LEFT)
 
-        # 多日提取模式选项
-        mode_frame = tk.Frame(top_row, bg='white')
+        # 第三行：多日模式选项（在日期范围下方，按钮上方）
+        mode_row = tk.Frame(body, bg='white')
+        mode_row.pack(fill=tk.X, pady=(0, 6))
+
+        mode_frame = tk.Frame(mode_row, bg='white')
         mode_frame.pack(side=tk.LEFT, padx=(0, 0))
 
         self.multi_day_var = tk.BooleanVar(value=False)
@@ -5244,7 +5232,7 @@ class UniversalExtractorGUI:
         self.multi_day_per_sheet_cb = multi_day_per_sheet_cb
         multi_day_per_sheet_cb.pack(side=tk.LEFT, padx=(6, 0))
 
-        # 第二行：操作按钮
+        # 第四行：操作按钮
         btn_row = tk.Frame(body, bg='white')
         btn_row.pack(fill=tk.X, pady=(4, 0))
 
@@ -5270,41 +5258,9 @@ class UniversalExtractorGUI:
 
     def _build_bottom_section(self, parent):
         """构建底部日志区域"""
-        # 创建滚动容器
-        scroll_container = tk.Frame(parent)
-        scroll_container.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
-
-        # 创建 Canvas 和滚动条
-        bottom_canvas = tk.Canvas(scroll_container, bg='white', highlightthickness=0,
-                                  height=200)
-        bottom_scrollbar = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL,
-                                         command=bottom_canvas.yview)
-        bottom_canvas.configure(yscrollcommand=bottom_scrollbar.set)
-
-        bottom_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        bottom_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Canvas 内部的可滚动 Frame
-        bottom = tk.Frame(bottom_canvas, bg='white')
-        bottom_canvas.create_window((0, 0), window=bottom, anchor='nw')
-
-        def on_bottom_configure(event):
-            bottom_canvas.configure(scrollregion=bottom_canvas.bbox('all'))
-
-        bottom.bind('<Configure>', on_bottom_configure)
-
-        # 鼠标滚轮支持
-        def on_mousewheel(event):
-            bottom_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def bound_to_mousewheel(event):
-            bottom_canvas.bind_all('<MouseWheel>', on_mousewheel)
-
-        def unbound_to_mousewheel(event):
-            bottom_canvas.unbind_all('<MouseWheel>')
-
-        bottom_canvas.bind('<Enter>', bound_to_mousewheel)
-        bottom_canvas.bind('<Leave>', unbound_to_mousewheel)
+        # 直接使用 Frame 作为容器，填满所有剩余空间
+        bottom = tk.Frame(parent, bg='white')
+        bottom.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
 
         progress_area = tk.Frame(bottom, bg='white')
         progress_area.pack(fill=tk.X, padx=16, pady=(10, 6))
@@ -5341,7 +5297,7 @@ class UniversalExtractorGUI:
                  cursor='hand2', padx=10, pady=2,
                  command=self.clear_log).pack(side=tk.RIGHT)
 
-        # 日志框架 - 关键修改：确保填充并扩展，添加滚动条支持
+        # 日志框架 - 填满所有剩余空间
         log_frame = tk.Frame(bottom, bg='#1e1e1e')
         log_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 8))
 
@@ -5403,13 +5359,13 @@ class UniversalExtractorGUI:
 
     def _select_all_tables(self):
         """全选所有数据表"""
-        for var in self.table_vars.values():
-            var.set(True)
+        self.table_dropdown._select_all()
+        self.table_dropdown._confirm()
 
     def _deselect_all_tables(self):
         """取消全选"""
-        for var in self.table_vars.values():
-            var.set(False)
+        self.table_dropdown._deselect_all()
+        self.table_dropdown._confirm()
 
     def _on_multi_day_toggle(self):
         """多日模式切换处理"""
@@ -5451,7 +5407,7 @@ class UniversalExtractorGUI:
 
     def get_selected_tables(self):
         """获取选中的数据表列表"""
-        return [name for name, var in self.table_vars.items() if var.get()]
+        return self.table_dropdown.get_selected()
 
     def validate_inputs(self):
         """验证输入"""
@@ -5597,6 +5553,7 @@ class UniversalExtractorGUI:
         if not self.validate_inputs():
             return
 
+        self.is_stopping = False
         self.extract_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.status_text.config(text="正在提取数据...")
@@ -5649,6 +5606,12 @@ class UniversalExtractorGUI:
             failed_count = 0
 
             for idx, table_name in enumerate(selected_tables):
+                # 检查是否被停止
+                if self.is_stopping:
+                    self.log("", "INFO")
+                    self.log("⚠ 用户停止了提取操作，已完成的表格数据已保存", "WARNING")
+                    break
+                
                 self.log("", "INFO")
                 self.log(f"--- [{idx + 1}/{total_tables}] 正在处理: {table_name} ---", "INFO")
 
@@ -5690,6 +5653,15 @@ class UniversalExtractorGUI:
                             pd.DataFrame().to_excel(per_day_filepath, index=False, engine='openpyxl', sheet_name='_init_')
                         
                         while current_dt <= end_dt:
+                            # 检查是否被停止
+                            if self.is_stopping:
+                                self.log("  ⚠ 用户停止了提取操作", "WARNING")
+                                self.log(f"  已保存 {saved_days_count} 天的数据", "INFO")
+                                if effective_per_day_sheet and per_day_filepath and os.path.exists(per_day_filepath):
+                                    self.extractor._finalize_per_day_excel(per_day_filepath, saved_days_count)
+                                self.root.after(0, self._extract_stopped_ui)
+                                return
+                            
                             day_num += 1
                             current_date_str = current_dt.strftime("%Y-%m-%d")
                             self.log(f"  >>> 正在提取日期: {current_date_str} ({day_num}/{day_count})", "INFO")
@@ -5995,11 +5967,20 @@ class UniversalExtractorGUI:
             f"请修改查询日期或联系管理员更新授权。"
         )
 
+    def _extract_stopped_ui(self):
+        """提取被停止后的UI更新"""
+        self.extract_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_text.config(text="提取已停止")
+        self.update_progress_bar(0, "提取已停止")
+
     def stop_extract(self):
         """停止提取"""
-        messagebox.showinfo("提示", "停止功能开发中...")
-        self.stop_btn.config(state=tk.DISABLED)
-        self.extract_btn.config(state=tk.NORMAL)
+        if not self.is_stopping:
+            self.is_stopping = True
+            self.stop_btn.config(state=tk.DISABLED)
+            self.log("正在停止提取，请等待当前任务完成...", "WARNING")
+            self.status_text.config(text="正在停止...")
 
     def clear_log(self):
         """清空日志"""
