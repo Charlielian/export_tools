@@ -1,0 +1,60 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if (Test-Path "requirements.txt") {
+          pip install -r requirements.txt
+        }
+        pip install pyinstaller
+
+    - name: Create config.yaml if not exists
+      run: |
+        if (!(Test-Path "config.yaml")) {
+          @"
+# 配置文件 - 请根据实际情况修改以下内容
+# 打包后，用户可以将此文件放在 EXE 同目录下覆盖默认配置
+
+auth:
+  username: 'XXXXX'
+  password: 'XXXX'
+
+paths:
+  output_dir: './data_output'
+  cookie_dir: './cookies'
+  captcha_dir: './captcha_images'
+  log_dir: './logs'
+
+server:
+  base_url: 'https://nqi.gmcc.net:20443'
+"@ | Out-File -FilePath "config.yaml" -Encoding utf8
+        }
+
+    - name: Build EXE
+      run: |
+        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx universal_extractor_gui.py
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: universal-extractor-exe
+        path: dist/universal_extractor_gui.exe
