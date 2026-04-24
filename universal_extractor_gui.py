@@ -249,6 +249,19 @@ def generate_machine_code(hw_info):
 
 
 # ==================== 配置文件加载 ====================
+def get_base_path():
+    """获取程序运行的基础路径（兼容 PyInstaller 打包）"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后的环境
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_app_path():
+    """获取应用程序所在目录（EXE所在目录）"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 def load_config():
     """从 YAML 文件加载配置"""
     config = {
@@ -267,7 +280,15 @@ def load_config():
         }
     }
 
-    config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+    # 优先从应用程序所在目录读取配置文件（允许用户自定义）
+    app_path = get_app_path()
+    config_file = os.path.join(app_path, 'config.yaml')
+
+    # 如果应用目录没有，尝试从 PyInstaller 资源目录读取（打包时的默认配置）
+    if not os.path.exists(config_file):
+        base_path = get_base_path()
+        config_file = os.path.join(base_path, 'config.yaml')
+
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
@@ -276,6 +297,8 @@ def load_config():
                     config.update(yaml_config)
         except Exception as e:
             print(f"警告：加载配置文件失败 ({config_file}): {e}")
+    else:
+        print(f"[INFO] 未找到配置文件 ({config_file})，使用默认配置")
 
     return config
 
@@ -3448,6 +3471,46 @@ def get_5g_voice_payload():
     return payload
 
 
+def get_5g_gongcan_payload():
+    """获取5G小区工参报表payload（使用table类型API）"""
+    print("[DEBUG-PAYLOAD] 生成 5G小区工参报表 payload")
+
+    # 工参报表使用getSelectTable接口，参数为数据库表名
+    # 这里返回一个标记，由提取逻辑特殊处理
+    return {
+        '__gongcan__': True,
+        'table_key': 'appdbv3.a_common_cfg_nr_cellant_d',
+        'fieldtype': '5G小区工参',
+        'api_type': 'table',
+        'geographicdimension': '小区，网格，地市，分公司',
+        'timedimension': '天粒度',
+        'enodebField': 'gnodeb_id',
+        'cgiField': 'ncgi',
+        'timeField': 'starttime',
+        'cellField': 'nrcell_name',
+        'cityField': 'city'
+    }
+
+
+def get_4g_gongcan_payload():
+    """获取4G小区工参报表payload（使用table类型API）"""
+    print("[DEBUG-PAYLOAD] 生成 4G小区工参报表 payload")
+
+    return {
+        '__gongcan__': True,
+        'table_key': 'appdbv3.v_a_common_cfg_lte_cellant_d',
+        'fieldtype': '4G小区工参',
+        'api_type': 'table',
+        'geographicdimension': '小区，网格，地市，分公司',
+        'timedimension': '天粒度',
+        'enodebField': 'enodeb_id',
+        'cgiField': 'cgi',
+        'timeField': 'starttime',
+        'cellField': 'cell_name',
+        'cityField': 'city'
+    }
+
+
 def add_wanchenglv_columns(df, report_type='4g'):
     """添加全程完好率计算列
     
@@ -4369,9 +4432,9 @@ class CustomDataExtractor:
         
         # 需要动态获取字段的报表类型（不包括4G/5G小区性能KPI报表，因为已经硬编码）
         dynamic_tables = [
-            'VoLTE小区监控预警', 'EPSFB小区监控预警', 'VONR小区监控预警'
+            'VoLTE小区监控预警', 'EPSFB小区监控预警', 'VONR小区监控预警', '5GMR覆盖-小区天', '4GMR覆盖-小区天'
         ]
-        
+
         if table_name in dynamic_tables:
             # 映射表名到API key、fieldtype和API类型
             # api_type: 'search' 使用adhocquery/search接口，'table' 使用adhocquery/getSelectTable接口
@@ -4382,6 +4445,8 @@ class CustomDataExtractor:
                 'VoLTE小区监控预警': ('volte小区监控预警', 'VoLTE小区监控预警数据表-天', 'search'),
                 'EPSFB小区监控预警': ('EPSFB', 'EPSFB小区监控预警数据表-天', 'search'),
                 'VONR小区监控预警': ('vonr', 'VONR小区监控预警数据表-天', 'search'),
+                '5GMR覆盖-小区天': ('appdbv3.a_common_mro_scssrsrp_nr_nrcell', '应用_5GMRO_RSRP基础性能_小区', 'table'),
+                '4GMR覆盖-小区天': ('appdbv3.a_common_mro_rsrp_lte_cell', '应用_4GMRO_RSRP基础性能_小区', 'table'),
                 '5G小区性能KPI报表': ('appdbv3.a_common_pm_sacu', 'SA_CU性能', 'table'),
                 '4G小区性能KPI报表': ('appdbv3.a_common_pm_lte', '公共信息（小区级粒度）', 'table'),
             }
@@ -4410,6 +4475,26 @@ class CustomDataExtractor:
             # 如果返回None（4G语音小区等特殊报表），返回特殊标记让调用方处理
             if payload is None:
                 return {'__special__': '4G_VOICE_MERGE', 'start_date': start_date, 'end_date': end_date, 'city': city}
+            # 如果返回__gongcan__标记（工参报表），使用table类型API动态构建payload
+            if isinstance(payload, dict) and payload.get('__gongcan__'):
+                table_key = payload.get('table_key')
+                fieldtype = payload.get('fieldtype')
+                api_type = payload.get('api_type')
+                if table_key and fieldtype:
+                    # 工参报表只取前一天的数据
+                    yesterday = datetime.now() - timedelta(days=1)
+                    yesterday_str = yesterday.strftime('%Y-%m-%d')
+                    start_time = yesterday_str + ' 00:00:00'
+                    end_time = yesterday_str + ' 23:59:59'
+                    where_conditions = [
+                        {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '>=', 'val': start_time, 'whereCon': 'and', 'query': True},
+                        {'datatype': 'timestamp', 'feild': 'starttime', 'feildName': '', 'symbol': '<', 'val': end_time, 'whereCon': 'and', 'query': True},
+                        {'datatype': 'character', 'feild': 'city', 'feildName': '', 'symbol': 'in', 'val': city, 'whereCon': 'and', 'query': True}
+                    ]
+                    payload = self.jxcx.build_payload_from_config(table_key, fieldtype, where_conditions, api_type)
+                    if payload:
+                        return payload
+                return None
             payload = set_payload_time(payload, start_date + ' 00:00:00', end_date + ' 23:59:59')
             payload = set_payload_city(payload, city)
             return payload
@@ -4566,6 +4651,16 @@ class TableConfig:
             'use_interference_filter': False,
             'description': 'VONR小区监控预警数据'
         },
+        '5GMR覆盖-小区天': {
+            'payload_func': None,
+            'use_interference_filter': False,
+            'description': '5GMR覆盖-小区天'
+        },
+        '4GMR覆盖-小区天': {
+            'payload_func': None,
+            'use_interference_filter': False,
+            'description': '4GMR覆盖-小区天'
+        },
         '5G小区性能KPI报表': {
             'payload_func': get_5g_kpi_payload,
             'use_interference_filter': False,
@@ -4599,6 +4694,18 @@ class TableConfig:
             'use_interference_filter': False,
             'calc_columns': ['5G语音小区'],
             'description': '5G语音小区（VONR）'
+        },
+        '5G小区工参报表': {
+            'payload_func': get_5g_gongcan_payload,
+            'use_interference_filter': False,
+            'is_gongcan': True,
+            'description': '5G小区工参报表（固定取前一天）'
+        },
+        '4G小区工参报表': {
+            'payload_func': get_4g_gongcan_payload,
+            'use_interference_filter': False,
+            'is_gongcan': True,
+            'description': '4G小区工参报表（固定取前一天）'
         },
     }
 
@@ -4998,7 +5105,7 @@ class UniversalExtractorGUI:
                 bg='white', fg='#5f6368').pack(side=tk.LEFT, padx=(0, 6))
 
         self.category_vars = {}
-        categories = ["干扰", "容量", "语音报表", "小区性能", "全程完好率", "语音小区"]
+        categories = ["干扰", "容量", "工参", "MR覆盖", "语音报表", "小区性能", "全程完好率", "语音小区"]
 
         for name in categories:
             var = tk.IntVar(value=0)
@@ -5024,6 +5131,8 @@ class UniversalExtractorGUI:
         TABLE_CATEGORIES = {
             '干扰': ['5G干扰小区', '4G干扰小区'],
             '容量': ['5G小区容量报表', '重要场景-天'],
+            '工参': ['5G小区工参报表', '4G小区工参报表'],
+            'MR覆盖': ['5GMR覆盖-小区天', '4GMR覆盖-小区天'],
             '语音报表': ['VoLTE小区监控预警', 'VONR小区监控预警', 'EPSFB小区监控预警'],
             '小区性能': ['5G小区性能KPI报表', '4G小区性能KPI报表'],
             '全程完好率': ['4G全程完好率报表', '5G全程完好率报表'],
@@ -5344,6 +5453,8 @@ class UniversalExtractorGUI:
         TABLE_CATEGORIES = {
             '干扰': ['5G干扰小区', '4G干扰小区'],
             '容量': ['5G小区容量报表', '重要场景-天'],
+            '工参': ['5G小区工参报表', '4G小区工参报表'],
+            'MR覆盖': ['5GMR覆盖-小区天', '4GMR覆盖-小区天'],
             '语音报表': ['VoLTE小区监控预警', 'VONR小区监控预警', 'EPSFB小区监控预警'],
             '小区性能': ['5G小区性能KPI报表', '4G小区性能KPI报表'],
             '全程完好率': ['4G全程完好率报表', '5G全程完好率报表'],
@@ -5627,16 +5738,68 @@ class UniversalExtractorGUI:
                 if is_4g_voice and is_per_day_sheet:
                     self.log(f"  (注: 4G语音小区不支持按日分Sheet，将合并为一个文件)", "INFO")
 
+                # 工参报表不支持多日模式，只取前一天
+                is_gongcan = table_config.get('is_gongcan', False)
+                if is_gongcan:
+                    self.log(f"  (注: 工参报表固定取前一天数据，不受日期范围影响)", "INFO")
+
                 if is_multi_day:
+                    # 工参报表在多日模式下只提取一次（前一天）
+                    if is_gongcan:
+                        self.log(f"  (工参报表多日模式只提取一次，日期自动使用前一天)", "INFO")
+                        try:
+                            # 计算前一天
+                            yesterday = datetime.now() - timedelta(days=1)
+                            yesterday_str = yesterday.strftime('%Y-%m-%d')
+                            self.log(f"  >>> 工参报表使用固定日期: {yesterday_str}", "INFO")
+
+                            self.update_progress_bar(
+                                int((idx / total_tables) * 100),
+                                f"正在提取 {table_name} (工参固定日期: {yesterday_str})..."
+                            )
+
+                            payload = self.extractor.get_payload_with_dynamic_fields(
+                                table_config, yesterday_str, yesterday_str, city
+                            )
+
+                            if not payload:
+                                self.log(f"✗ 生成payload失败: {table_name}", "ERROR")
+                                failed_count += 1
+                            else:
+                                self.update_progress_bar(
+                                    int(((idx + 0.5) / total_tables) * 100),
+                                    f"正在查询 {yesterday_str}..."
+                                )
+                                df = self.extractor.jxcx.get_table(payload, to_df=True)
+
+                                if df.empty:
+                                    self.log(f"  ⚠ 查询无数据 (日期: {yesterday_str})", "WARNING")
+                                else:
+                                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                    filename = f'{table_name}_{city}_{yesterday_str}_{yesterday_str}_{timestamp}.xlsx'
+                                    filepath = self.extractor.save_to_excel(df, filename)
+
+                                    if filepath:
+                                        self.log(f"  ✓ {table_name} 提取成功！共 {len(df)} 条记录 (日期: {yesterday_str})", "SUCCESS")
+                                        self.log(f"    文件已保存: {filepath}", "SUCCESS")
+                                        success_count += 1
+                                    else:
+                                        self.log(f"  ✗ 保存文件失败", "ERROR")
+                                        failed_count += 1
+                        except Exception as e:
+                            self.log(f"✗ [{table_name}] 工参报表处理异常: {e}", "ERROR")
+                            failed_count += 1
+                        continue
+
                     # 多日模式：按日期逐天提取
                     try:
                         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
                         end_dt = datetime.strptime(end_date, "%Y-%m-%d")
                         current_dt = start_dt
-                        
+
                         day_count = (end_dt - start_dt).days + 1
                         day_num = 0
-                        
+
                         # 用于收集所有日期的数据（合并模式）
                         all_dfs = []
                         total_rows = 0
@@ -5828,6 +5991,46 @@ class UniversalExtractorGUI:
                         self.log(f"✗ [{table_name}] 多日模式处理异常: {e}", "ERROR")
                         failed_count += 1
                 else:
+                    # 工参报表在普通模式下也只提取一次（前一天）
+                    if is_gongcan:
+                        try:
+                            # 计算前一天
+                            yesterday = datetime.now() - timedelta(days=1)
+                            yesterday_str = yesterday.strftime('%Y-%m-%d')
+                            self.log(f"  (工参报表固定日期: {yesterday_str})", "INFO")
+
+                            self.update_progress_bar(int((idx / total_tables) * 100), f"正在提取 {table_name} (工参固定日期: {yesterday_str})...")
+
+                            payload = self.extractor.get_payload_with_dynamic_fields(
+                                table_config, yesterday_str, yesterday_str, city
+                            )
+
+                            if not payload:
+                                self.log(f"✗ 生成payload失败: {table_name}", "ERROR")
+                                failed_count += 1
+                            else:
+                                self.update_progress_bar(int(((idx + 0.5) / total_tables) * 100), f"正在查询 {yesterday_str}...")
+                                df = self.extractor.jxcx.get_table(payload, to_df=True)
+
+                                if df.empty:
+                                    self.log(f"⚠ 查询无数据: {table_name} (日期: {yesterday_str})", "WARNING")
+                                else:
+                                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                    filename = f'{table_name}_{city}_{yesterday_str}_{yesterday_str}_{timestamp}.xlsx'
+                                    filepath = self.extractor.save_to_excel(df, filename)
+
+                                    if filepath:
+                                        self.log(f"✓ {table_name} 提取成功！共 {len(df)} 条记录 (日期: {yesterday_str})", "SUCCESS")
+                                        self.log(f"  文件已保存: {filepath}", "SUCCESS")
+                                        success_count += 1
+                                    else:
+                                        self.log(f"✗ 保存文件失败", "ERROR")
+                                        failed_count += 1
+                        except Exception as e:
+                            self.log(f"✗ [{table_name}] 工参报表处理异常: {e}", "ERROR")
+                            failed_count += 1
+                        continue
+
                     # 普通模式：直接提取整个日期范围
                     self.update_progress_bar(int((idx / total_tables) * 100), f"正在提取 {table_name}...")
 
