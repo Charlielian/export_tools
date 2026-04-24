@@ -46,7 +46,8 @@ paths:
 
 server:
   base_url: 'https://nqi.gmcc.net:20443'
-"@ | Out-File -FilePath "config.yaml" -Encoding utf8
+"@
+          Out-File -FilePath "config.yaml" -Encoding utf8
         }
 
     - name: Build EXE
