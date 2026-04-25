@@ -13,14 +13,16 @@ def get_base_path():
     """获取程序运行的基础路径（兼容 PyInstaller 打包）"""
     if getattr(sys, 'frozen', False):
         return sys._MEIPASS
-    return os.path.dirname(os.path.abspath(__file__))
+    current_file = os.path.abspath(__file__)
+    return os.path.dirname(os.path.dirname(current_file))
 
 
 def get_app_path():
     """获取应用程序所在目录（EXE所在目录）"""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    current_file = os.path.abspath(__file__)
+    return os.path.dirname(os.path.dirname(current_file))
 
 
 def load_config():

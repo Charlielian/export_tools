@@ -157,18 +157,20 @@ def verify_license(machine_code):
         if len(parts) < 2:
             return False, "授权文件格式错误"
 
-        sn_len_bytes = parts[0]
+        sn_len_bytes = parts[0][:4]
         sn_len = struct.unpack(">I", sn_len_bytes)[0]
-        sn = parts[1][:sn_len].decode('utf-8')
-        signature = parts[1][sn_len:].decode('utf-8')
-        encrypted_data = parts[2]
+        sn = parts[0][4:4+sn_len].decode('utf-8')
+        signature = parts[0][4+sn_len:].decode('utf-8')
+        encrypted_data = parts[1]
 
         if sn != machine_code:
             return False, "机器码不匹配"
 
         AES_KEY = b"GMCCLicenseV2Key"
-        decrypted = aes_decrypt(encrypted_data, AES_KEY)
-        expiry_str = decrypted.split('|')[0]
+        import base64
+        encrypted_bytes = base64.b64decode(encrypted_data)
+        decrypted = aes_decrypt(encrypted_bytes, AES_KEY)
+        expiry_str = decrypted.split(b'|')[0].decode('utf-8')
 
         expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
         if datetime.now() > expiry_date:

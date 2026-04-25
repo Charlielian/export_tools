@@ -47,20 +47,25 @@ class NqiToolGUI:
 
     def _setup_logging(self):
         """设置日志系统"""
-        ensure_dirs()
-        log_filename = f"NqiTool_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        self.log_file_path = os.path.join(LOG_DIR, log_filename)
-        set_log_file(self.log_file_path)
+        try:
+            ensure_dirs()
+            log_filename = f"NqiTool_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            self.log_file_path = os.path.join(LOG_DIR, log_filename)
+            set_log_file(self.log_file_path)
 
-        self.logger = logging.getLogger()
-        self.logger.setLevel(logging.DEBUG)
+            self.logger = logging.getLogger()
+            self.logger.setLevel(logging.DEBUG)
 
-        file_handler = logging.FileHandler(self.log_file_path, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
-                                    datefmt='%Y-%m-%d %H:%M:%S')
-        file_handler.setFormatter(formatter)
-        self.logger.addHandler(file_handler)
+            file_handler = logging.FileHandler(self.log_file_path, encoding='utf-8')
+            file_handler.setLevel(logging.DEBUG)
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
+                                        datefmt='%Y-%m-%d %H:%M:%S')
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+        except Exception as e:
+            print(f"[WARNING] 初始化日志系统失败: {e}")
+            self.logger = logging.getLogger()
+            self.logger.setLevel(logging.DEBUG)
 
     def _create_widgets(self):
         """创建界面组件"""
