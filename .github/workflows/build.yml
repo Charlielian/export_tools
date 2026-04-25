@@ -17,22 +17,20 @@ jobs:
     - name: Set up Python 3.13
       uses: actions/setup-python@v6
       with:
-        python-version: '3.13'  # 已改为 3.13
+        python-version: '3.13'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        if (Test-Path "requirements.txt") {
-          pip install -r requirements.txt
-        }
+        pip install -r requirements.txt
         pip install pyinstaller
 
     - name: Create config.yaml if not exists
       run: |
         if (!(Test-Path "config.yaml")) {
           New-Item -Path "config.yaml" -ItemType File -Force
-          Add-Content -Path "config.yaml" -Value "# 配置文件 - 请根据实际情况修改以下内容"
-          Add-Content -Path "config.yaml" -Value "# 打包后，用户可以将此文件放在 EXE 同目录下覆盖默认配置"
+          Add-Content -Path "config.yaml" -Value "# NQI工具配置文件"
+          Add-Content -Path "config.yaml" -Value "# 请根据实际情况修改以下内容"
           Add-Content -Path "config.yaml" -Value ""
           Add-Content -Path "config.yaml" -Value "auth:"
           Add-Content -Path "config.yaml" -Value "  username: 'XXXXX'"
@@ -48,9 +46,9 @@ jobs:
           Add-Content -Path "config.yaml" -Value "  base_url: 'https://nqi.gmcc.net:20443'"
         }
 
-    - name: Build EXE
+    - name: Build EXE using spec file
       run: |
-        pyinstaller --onefile --windowed --name NqiTool --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;." NqiTool_gui.py
+        pyinstaller NqiTool.spec
 
     - name: Upload artifact
       uses: actions/upload-artifact@v6
