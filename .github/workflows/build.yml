@@ -50,7 +50,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name universal_extractor_gui --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;." universal_extractor_gui.py
+        pyinstaller --onefile --windowed --name NqiTool --noupx --add-data "授权工具/public_key.pem;授权工具" --add-data "config.yaml;." NqiTool_gui.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v6
