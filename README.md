@@ -1,6 +1,6 @@
-# 免审批导出工具
+# NQI工具
 
-通用数据提取工具，支持多种数据表的自动导出，包括4G干扰小区、5G干扰小区、5G小区容量报表等。
+NQI平台数据提取工具，支持多种数据表的自动导出，包括4G干扰小区、5G干扰小区、5G小区容量报表等。
 
 ## 功能特点
 
@@ -25,8 +25,8 @@
 
 1. 访问 GitHub 仓库的 [Actions](https://github.com/Charlielian/export_tools/actions) 页面
 2. 选择最新的成功构建
-3. 下载 `universal-extractor-exe` 构建产物
-4. 解压后运行 `universal_extractor_gui.exe`
+3. 下载 `nqi_tool` 构建产物
+4. 解压后运行 `NqiTool.exe`
 
 ### 方法二：从源码运行
 
@@ -54,7 +54,7 @@ python universal_extractor_gui.py
 
 ```
 .
-├── universal_extractor_gui.py    # 主程序入口（GUI版本）
+├── NqiTool_gui.py    # 主程序入口（GUI版本）
 ├── requirements.txt             # Python依赖列表
 ├── README.md                    # 项目说明文档
 ├── 授权工具/                     # 授权相关工具
@@ -63,7 +63,7 @@ python universal_extractor_gui.py
 │   ├── license_records.json     # 许可证记录
 │   ├── private_key.pem          # 私钥文件
 │   ├── public_key.pem           # 公钥文件
-│   └── universal_extractor_gui_license_creator.py  # 许可证创建器
+│   └── NqiTool_license_creator.py  # 许可证创建器
 ├── captcha_images/             # 验证码图片目录
 ├── cookies/                     # Cookie存储目录
 ├── data_output/                 # 数据输出目录

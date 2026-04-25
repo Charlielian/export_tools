@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-通用数据提取工具 - GUI版本
+NQI工具 - GUI版本
 支持多种数据表：4G干扰小区、5G干扰小区、5G小区容量报表等
 
 使用方法：
@@ -4987,7 +4987,7 @@ class UniversalExtractorGUI:
         self.logger.addHandler(file_handler)
 
         self.logger.info("=" * 50)
-        self.logger.info("通用数据提取工具 GUI 启动")
+        self.logger.info("NQI工具 GUI 启动")
         self.logger.info(f"日志文件: {self.log_file_path}")
         self.logger.info("=" * 50)
 
@@ -6258,7 +6258,7 @@ class UniversalExtractorGUI:
 
     def load_config(self):
         """加载配置"""
-        self.log("通用数据提取工具已就绪", "INFO")
+        self.log("NQI工具已就绪", "INFO")
         self.log(f"支持的数据表: {', '.join(TableConfig.get_table_names())}", "INFO")
 
     def on_closing(self):

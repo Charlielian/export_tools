@@ -55,5 +55,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v6
       with:
-        name: universal-extractor-exe
-        path: dist/universal_extractor_gui.exe
+        name: nqi_tool
+        path: dist/NqiTool.exe
