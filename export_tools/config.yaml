@@ -1,8 +1,0 @@
-username: your_username
-password: your_password
-base_url: https://example.com
-export_interval: 3600
-output_dir: ./data_output
-log_dir: ./logs
-captcha_dir: ./captcha_images
-cookie_dir: ./cookies
