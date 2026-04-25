@@ -27,8 +27,6 @@ def check_license():
     print(f"机器码: {machine_code}")
     print(f"请将机器码发送给管理员获取授权")
 
-    return True, None, machine_code
-
     valid, error = verify_license(machine_code)
 
     if not valid:

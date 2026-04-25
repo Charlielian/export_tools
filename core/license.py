@@ -167,16 +167,19 @@ def verify_license(machine_code):
             return False, "机器码不匹配"
 
         AES_KEY = b"GMCCLicenseV2Key"
-        import base64
-        encrypted_bytes = base64.b64decode(encrypted_data)
-        decrypted = aes_decrypt(encrypted_bytes, AES_KEY)
-        expiry_str = decrypted.split(b'|')[0].decode('utf-8')
+        try:
+            import base64
+            encrypted_bytes = base64.b64decode(encrypted_data)
+            decrypted = aes_decrypt(encrypted_bytes, AES_KEY)
+            expiry_str = decrypted.split(b'|')[0].decode('utf-8')
 
-        expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
-        if datetime.now() > expiry_date:
-            return False, f"授权已过期（{expiry_str}）"
+            expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
+            if datetime.now() > expiry_date:
+                return False, f"授权已过期（{expiry_str}）"
 
-        return True, None
+            return True, None
+        except Exception as e:
+            return False, f"授权文件解密失败: {str(e)}"
 
     except Exception as e:
         return False, f"授权验证失败: {str(e)}"
