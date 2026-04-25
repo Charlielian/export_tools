@@ -15,6 +15,7 @@ import os
 import sys
 import time
 import struct
+import re
 from datetime import datetime, timedelta
 import calendar
 import queue
@@ -170,7 +171,11 @@ def get_macos_hw_info():
     try:
         cmd = ["ifconfig", "en0"]
         output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("utf-8")
-        hw_info["mac"] = output.split("ether")[1].split(" ")[1].strip().replace(":", "")
+        mac_match = re.search(r'ether\s+([0-9a-fA-F:]+)', output)
+        if mac_match:
+            hw_info["mac"] = mac_match.group(1).replace(":", "").lower()
+        else:
+            hw_info["mac"] = "unknown_mac"
     except:
         hw_info["mac"] = "unknown_mac"
     return hw_info
