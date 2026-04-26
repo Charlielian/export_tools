@@ -12,11 +12,15 @@ import struct
 import base64
 import threading
 import time
+import json
 
 from datetime import datetime
 
 from utils.config import LICENSE_FILE, EXPIRY_DATE
 from utils.crypto import aes_decrypt
+
+# 配置
+SERIAL_PREFIX = "NQI-"  # 序列号前缀
 
 
 def get_macos_hw_info():
@@ -128,6 +132,170 @@ def get_public_key():
     with open(public_key_path, 'r') as f:
         content = f.read()
         return content.replace('-----BEGIN PUBLIC KEY-----', '').replace('-----END PUBLIC KEY-----', '').replace('\n', '')
+
+
+def load_public_key():
+    """加载RSA公钥对象"""
+    public_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '授权工具', 'public_key.pem')
+    if not os.path.exists(public_key_path):
+        return None
+    try:
+        from Crypto.PublicKey import RSA
+        with open(public_key_path, 'rb') as f:
+            return RSA.import_key(f.read())
+    except:
+        from Cryptodome.PublicKey import RSA
+        with open(public_key_path, 'rb') as f:
+            return RSA.import_key(f.read())
+
+
+def verify_serial_number(serial_number, machine_code):
+    """验证序列号并返回授权信息
+
+    Args:
+        serial_number: 验证序列号
+        machine_code: 当前机器的机器码
+
+    Returns:
+        tuple: (success, message_or_info)
+        - 成功: (True, {"expiry_time": ..., "first_run_time": ...})
+        - 失败: (False, "错误信息")
+    """
+    # 移除前缀和分隔符
+    serial = serial_number.strip()
+    if serial.startswith(SERIAL_PREFIX):
+        serial = serial[len(SERIAL_PREFIX):]
+    serial = serial.replace('-', '')
+
+    try:
+        # Base64 解码
+        decoded = base64.b64decode(serial)
+
+        # 解析版本
+        version = decoded[0]
+        if version != 1:
+            return False, f"不支持的序列号版本：{version}"
+
+        # 解析签名长度
+        signature_len = struct.unpack(">I", decoded[1:5])[0]
+
+        # 解析签名
+        signature = decoded[5:5+signature_len]
+
+        # 解析加密数据
+        encrypted_data = decoded[5+signature_len:]
+
+        # AES 解密
+        AES_KEY = b"GMCCLicenseV2Key"
+        iv = encrypted_data[:16]
+        cipher_text = encrypted_data[16:]
+
+        # 使用 Crypto 库解密
+        try:
+            from Crypto.Cipher import AES as AES_Cipher
+            from Crypto.Util.Padding import unpad
+        except:
+            from Cryptodome.Cipher import AES as AES_Cipher
+            from Cryptodome.Util.Padding import unpad
+
+        cipher = AES_Cipher.new(AES_KEY, AES_Cipher.MODE_CBC, iv)
+        decrypted = cipher.decrypt(cipher_text)
+        data_str = unpad(decrypted, 16).decode('utf-8')
+
+        # 解析 JSON
+        auth_data = json.loads(data_str)
+
+        # 验证机器码匹配
+        sn = auth_data["sn"]
+        if sn != machine_code:
+            return False, f"序列号与本机机器码不匹配"
+
+        # 验证签名（使用公钥验签）
+        public_key = load_public_key()
+        if public_key:
+            try:
+                from Crypto.Hash import SHA256
+                from Crypto.Signature import pkcs1_15
+                h = SHA256.new(sn.encode('utf-8'))
+                pkcs1_15.new(public_key).verify(h, signature)
+            except:
+                pass  # 签名验证可选，失败不影响
+
+        return True, {
+            "machine_code": sn,
+            "expiry_time": auth_data["exp"],
+            "first_run_time": auth_data["first"]
+        }
+
+    except Exception as e:
+        return False, f"序列号解析失败：{str(e)}"
+
+
+def write_license_from_serial(serial_info):
+    """从序列号验证结果写入 license.dat 文件
+
+    Args:
+        serial_info: verify_serial_number 返回的授权信息字典
+
+    Returns:
+        tuple: (success, message)
+    """
+    try:
+        license_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', LICENSE_FILE)
+
+        # 构建 license 数据
+        sn = serial_info["machine_code"]
+        expiry_time_str = serial_info["expiry_time"]
+        first_run_time_str = serial_info["first_run_time"]
+
+        # AES 加密
+        AES_KEY = b"GMCCLicenseV2Key"
+        try:
+            from Crypto.Cipher import AES as AES_Cipher
+            from Crypto.Util.Padding import pad
+        except:
+            from Cryptodome.Cipher import AES as AES_Cipher
+            from Cryptodome.Util.Padding import pad
+
+        import os as os_module
+        iv = os_module.urandom(16)
+        cipher = AES_Cipher.new(AES_KEY, AES_Cipher.MODE_CBC, iv)
+        padded_data = pad(f"{expiry_time_str}|{first_run_time_str}".encode('utf-8'), 16)
+        encrypted_data = iv + cipher.encrypt(padded_data)
+
+        # 编码加密数据
+        encoded_encrypted = base64.b64encode(encrypted_data).decode('utf-8')
+
+        # 对机器码进行签名
+        public_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '授权工具', 'public_key.pem')
+        if os.path.exists(public_key_path):
+            try:
+                from Crypto.PublicKey import RSA
+                from Crypto.Hash import SHA256
+                from Crypto.Signature import pkcs1_15
+                with open(public_key_path, 'rb') as f:
+                    public_key = RSA.import_key(f.read())
+                h = SHA256.new(sn.encode('utf-8'))
+                signature = pkcs1_15.new(public_key).sign(h)
+                signature_b64 = base64.b64encode(signature).decode('utf-8')
+            except:
+                signature_b64 = ""
+        else:
+            signature_b64 = ""
+
+        # 组装 license 文件格式
+        sn_bytes = sn.encode('utf-8')
+        sn_len = len(sn_bytes)
+        license_data = struct.pack(">I", sn_len) + sn_bytes + signature_b64.encode('utf-8') + b"|" + encoded_encrypted.encode('utf-8')
+
+        # 写入文件
+        with open(license_file, 'wb') as f:
+            f.write(license_data)
+
+        return True, "授权文件写入成功"
+
+    except Exception as e:
+        return False, f"写入授权文件失败：{str(e)}"
 
 
 def load_license():

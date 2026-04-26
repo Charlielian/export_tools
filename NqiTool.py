@@ -10,10 +10,11 @@ NQI平台数据提取工具
 import sys
 import os
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from datetime import datetime
 
 from core.license import get_hw_info, generate_machine_code, verify_license, get_effective_expiry
+from core.license import verify_serial_number, write_license_from_serial
 from gui.main_window import NqiToolGUI
 
 
@@ -37,60 +38,162 @@ def check_license():
     return True, None, machine_code
 
 
-def show_error_dialog_with_gui(title, message, machine_code):
-    """显示带机器码的错误对话框"""
-    root = tk.Tk()
-    root.title(title)
-    root.geometry("500x350")
+def show_activate_dialog(machine_code, parent=None):
+    """显示激活对话框"""
+    root = tk.Toplevel(parent) if parent else tk.Toplevel()
+    root.title("授权激活")
+    root.geometry("550x420")
     root.resizable(False, False)
     root.attributes("-topmost", True)
 
-    style = ttk.Style()
-    style.configure("Error.TLabel", foreground="red", font=("Arial", 11))
+    # 居中显示
+    if parent:
+        parent.update_idletasks()
+        x = (parent.winfo_width() - 550) // 2 + parent.winfo_x()
+        y = (parent.winfo_height() - 420) // 2 + parent.winfo_y()
+        root.geometry(f"550x420+{x}+{y}")
+    else:
+        root.withdraw()  # 隐藏根窗口
+        root.update_idletasks()
+        screen_w = root.winfo_screenwidth()
+        screen_h = root.winfo_screenheight()
+        x = (screen_w - 550) // 2
+        y = (screen_h - 420) // 2
+        root.geometry(f"550x420+{x}+{y}")
+        root.deiconify()  # 显示窗口
 
-    main_frame = ttk.Frame(root, padding="20")
-    main_frame.pack(fill=tk.BOTH, expand=True)
+    # 顶部标题
+    header = tk.Frame(root, bg='#dc2626', height=50)
+    header.pack(fill=tk.X)
+    header.pack_propagate(False)
 
-    ttk.Label(main_frame, text="授权验证失败",
-             font=("Arial", 14, "bold")).pack(pady=(0, 10))
+    tk.Label(header, text="⚠️ 授权验证失败",
+            font=('Microsoft YaHei UI', 16, 'bold'),
+            bg='#dc2626', fg='white').pack(pady=12)
 
-    ttk.Label(main_frame, text="错误信息：",
-             font=("Arial", 10, "bold")).pack(anchor=tk.W)
-    ttk.Label(main_frame, text=message,
-             style="Error.TLabel", wraplength=450).pack(fill=tk.X, pady=(0, 15))
+    # 主内容
+    content = tk.Frame(root, bg='#f9fafb')
+    content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-    ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=10)
+    # 本机信息卡片
+    info_card = tk.Frame(content, bg='white')
+    info_card.pack(fill=tk.X, pady=(0, 15))
 
-    ttk.Label(main_frame, text="您的机器码：",
-             font=("Arial", 10, "bold")).pack(anchor=tk.W)
-    code_frame = ttk.Frame(main_frame)
-    code_frame.pack(fill=tk.X, pady=5)
+    tk.Label(info_card, text="📋 本机信息",
+            font=('Microsoft YaHei UI', 12, 'bold'),
+            bg='white', fg='#374151', anchor='w').pack(padx=15, pady=(12, 5))
+
+    tk.Label(info_card, text="您的机器码（发送给管理员获取授权）：",
+            font=('Microsoft YaHei UI', 9),
+            bg='white', fg='#9ca3af', anchor='w').pack(padx=15, pady=(0, 5))
+
+    machine_frame = tk.Frame(info_card, bg='white')
+    machine_frame.pack(fill=tk.X, padx=15, pady=(0, 12))
 
     code_var = tk.StringVar(value=machine_code)
-    code_entry = ttk.Entry(code_frame, textvariable=code_var, font=("Courier", 9))
-    code_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    code_entry.configure(state='readonly')
+    code_entry = tk.Entry(machine_frame, textvariable=code_var,
+                         font=('Consolas', 8),
+                         relief='flat', bg='#f8f9fa', bd=0)
+    code_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
 
     def copy_code():
         root.clipboard_clear()
         root.clipboard_append(machine_code)
         copy_btn.config(text="已复制!")
+        root.after(1500, lambda: copy_btn.config(text="复制"))
 
-    copy_btn = ttk.Button(code_frame, text="复制", command=copy_code)
+    copy_btn = tk.Button(machine_frame, text="复制",
+                        font=('Microsoft YaHei UI', 8),
+                        bg='#f0f2f5', fg='#202124', bd=1,
+                        cursor='arrow', relief='raised', padx=10, pady=2,
+                        command=copy_code)
     copy_btn.pack(side=tk.LEFT, padx=(5, 0))
 
-    ttk.Label(main_frame, text="请将机器码发送给管理员获取授权",
-             foreground="gray").pack(pady=(10, 0))
+    # 激活输入卡片
+    input_card = tk.Frame(content, bg='white')
+    input_card.pack(fill=tk.BOTH, expand=True)
 
-    def on_close():
-        root.destroy()
-        sys.exit(1)
+    tk.Label(input_card, text="🎫 输入验证序列号",
+            font=('Microsoft YaHei UI', 12, 'bold'),
+            bg='white', fg='#374151', anchor='w').pack(padx=15, pady=(12, 5))
 
-    ok_btn = ttk.Button(main_frame, text="确定", command=on_close)
-    ok_btn.pack(pady=(20, 0))
+    tk.Label(input_card, text="如果管理员已提供验证序列号，请在此输入：",
+            font=('Microsoft YaHei UI', 9),
+            bg='white', fg='#9ca3af', anchor='w').pack(padx=15, pady=(0, 8))
 
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    root.mainloop()
+    serial_frame = tk.Frame(input_card, bg='white')
+    serial_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+    serial_entry = tk.Entry(serial_frame,
+                          font=('Consolas', 10),
+                          relief='flat', bg='#f8f9fa', bd=0)
+    serial_entry.pack(fill=tk.X, ipady=8)
+
+    tk.Label(serial_frame, text="格式示例：NQI-xxxx-xxxx-xxxx",
+            font=('Microsoft YaHei UI', 8),
+            bg='white', fg='#9ca3af').pack(anchor='w', pady=(4, 0))
+
+    # 提示信息
+    hint_label = tk.Label(input_card, text="",
+            font=('Microsoft YaHei UI', 9),
+            bg='white', fg='#9ca3af')
+    hint_label.pack(padx=15, pady=(0, 10))
+
+    # 按钮
+    btn_frame = tk.Frame(content, bg='#f9fafb')
+    btn_frame.pack(fill=tk.X, pady=(10, 0))
+
+    activate_btn = tk.Button(btn_frame, text="✅ 激活授权",
+             font=('Microsoft YaHei UI', 11, 'bold'),
+             bg='#22c55e', fg='white', bd=1,
+             cursor='hand2', relief='raised', padx=20, pady=8,
+             command=lambda: do_activate(serial_entry.get(), machine_code, root))
+    activate_btn.pack(side=tk.LEFT)
+
+    tk.Button(btn_frame, text="退出",
+             font=('Microsoft YaHei UI', 10),
+             bg='#f0f2f5', fg='#202124', bd=1,
+             cursor='arrow', relief='raised', padx=18, pady=8,
+             command=lambda: sys.exit(1)).pack(side=tk.RIGHT)
+
+    serial_entry.focus()
+
+    # 回车激活
+    serial_entry.bind('<Return>', lambda e: do_activate(serial_entry.get(), machine_code, root))
+
+    def do_activate(serial_number, current_machine_code, dialog):
+        """执行激活操作"""
+        if not serial_number or not serial_number.strip():
+            hint_label.config(text="请输入序列号", fg='#ef4444')
+            return
+
+        serial_number = serial_number.strip()
+        hint_label.config(text="正在验证...", fg='#fbbf24')
+
+        # 验证序列号
+        success, result = verify_serial_number(serial_number, current_machine_code)
+
+        if success:
+            # 写入 license.dat
+            write_success, write_msg = write_license_from_serial(result)
+            if write_success:
+                hint_label.config(text="激活成功！正在启动...", fg='#22c55e')
+                dialog.destroy()
+                root.destroy()  # 关闭自己
+                # 继续启动程序
+                start_main_app()
+            else:
+                hint_label.config(text=f"写入授权失败：{write_msg}", fg='#ef4444')
+        else:
+            hint_label.config(text=result, fg='#ef4444')
+
+
+def start_main_app():
+    """启动主程序"""
+    expiry_time = get_effective_expiry()
+    root = tk.Tk()
+    app = NqiToolGUI(root, expiry_time)
+    app.run()
 
 
 def main():
@@ -102,14 +205,9 @@ def main():
 
     valid, error, machine_code = check_license()
     if not valid:
-        show_error_dialog_with_gui("授权验证失败", error, machine_code)
-        sys.exit(1)
-
-    expiry_time = get_effective_expiry()
-
-    root = tk.Tk()
-    app = NqiToolGUI(root, expiry_time)
-    app.run()
+        # 显示激活对话框
+        show_activate_dialog(machine_code)
+        tk.mainloop()
 
 
 if __name__ == '__main__':

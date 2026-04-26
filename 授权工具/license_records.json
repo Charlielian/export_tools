@@ -2,8 +2,8 @@
   {
     "machine_code": "5ea6281d3f278d03c8902355c0bab4ffbee5faf540edb70c83dfd995e3e5a7de",
     "first_generate_time": "2026-04-22 21:46:52",
-    "last_generate_time": "2026-04-22 21:46:52",
-    "count": 1,
+    "last_generate_time": "2026-04-26 13:36:01",
+    "count": 2,
     "note": "macbookpro"
   },
   {
@@ -77,10 +77,17 @@
     "note": "东莞"
   },
   {
-    "machine_code": "8b3bc86a4418a589b417ff614cce32b7ac77104d47f5d44028c815df6400cda9",
-    "first_generate_time": "2026-04-25 23:01:50",
-    "last_generate_time": "2026-04-25 23:01:50",
+    "machine_code": "5d95788844bef775a4ba79c564c324f362ff2ba41b6a0f348ef1510276226356",
+    "first_generate_time": "2026-04-24 23:23:40",
+    "last_generate_time": "2026-04-24 23:23:40",
     "count": 1,
-    "note": "11111"
+    "note": "macbook"
+  },
+  {
+    "machine_code": "8b3bc86a4418a589b417ff614cce32b7ac77104d47f5d44028c815df6400cda9",
+    "first_generate_time": "2026-04-25 23:04:46",
+    "last_generate_time": "2026-04-26 16:51:10",
+    "count": 4,
+    "note": "macmini4"
   }
 ]

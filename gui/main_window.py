@@ -16,7 +16,7 @@ from gui.widgets import LogTextHandler, TableConfig, MultiSelectDropdown
 from core.auth import LoginManager
 from core.query import JXCXQuery
 from core.export import export_with_format
-from core.license import TimeMonitor, invalidate_license
+from core.license import TimeMonitor, invalidate_license, verify_serial_number, write_license_from_serial
 from utils.logger import set_log_file, ensure_dirs
 from utils.config import LOG_DIR, EXPIRY_DATE, DEFAULT_USERNAME, DEFAULT_PASSWORD
 
@@ -116,6 +116,14 @@ class NqiToolGUI:
                               font=('Microsoft YaHei UI', 9),
                               bg='#165DFF', fg='#e0e7ff')
         self.license_label.pack(side=tk.LEFT, padx=(0, 15))
+
+        # 激活按钮
+        self.activate_btn = tk.Button(self.right_frame, text="🎫 激活",
+                              font=('Microsoft YaHei UI', 9),
+                              bg='#22c55e', fg='white', bd=0,
+                              cursor='hand2', relief='flat', padx=10, pady=4,
+                              command=self._show_activate_window)
+        self.activate_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         # 状态指示器
         self.status_dot = tk.Label(self.right_frame, text="●", font=('Arial', 14),
@@ -947,3 +955,164 @@ class NqiToolGUI:
         if hasattr(self, '_time_monitor'):
             self._time_monitor.stop()
         self.root.destroy()
+
+    def _show_activate_window(self):
+        """显示序列号激活窗口"""
+        from core.license import generate_machine_code, get_hw_info
+
+        # 获取本机机器码
+        hw_info = get_hw_info()
+        machine_code = generate_machine_code(hw_info)
+
+        # 创建激活窗口
+        activate_win = tk.Toplevel(self.root)
+        activate_win.title("授权激活")
+        activate_win.geometry("550x400")
+        activate_win.resizable(False, False)
+
+        # 设置窗口在主窗口中间
+        self.root.update_idletasks()
+        x = (self.root.winfo_width() - 550) // 2 + self.root.winfo_x()
+        y = (self.root.winfo_height() - 400) // 2 + self.root.winfo_y()
+        activate_win.geometry(f"550x400+{x}+{y}")
+
+        activate_win.transient(self.root)
+        activate_win.grab_set()
+
+        # 顶部标题
+        header = tk.Frame(activate_win, bg='#165DFF', height=50)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+
+        tk.Label(header, text="🎫 授权激活",
+                font=('Microsoft YaHei UI', 16, 'bold'),
+                bg='#165DFF', fg='white').pack(pady=12)
+
+        # 主内容
+        content = tk.Frame(activate_win, bg='#f9fafb')
+        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # 本机信息卡片
+        info_card = tk.Frame(content, bg='white')
+        info_card.pack(fill=tk.X, pady=(0, 15))
+
+        tk.Label(info_card, text="📋 本机信息",
+                font=('Microsoft YaHei UI', 12, 'bold'),
+                bg='white', fg='#374151', anchor='w').pack(padx=15, pady=(12, 5))
+
+        machine_frame = tk.Frame(info_card, bg='white')
+        machine_frame.pack(fill=tk.X, padx=15, pady=(0, 12))
+
+        tk.Label(machine_frame, text="机器码：",
+                font=('Microsoft YaHei UI', 9, 'bold'),
+                bg='white', fg='#5f6368').pack(side=tk.LEFT)
+
+        machine_code_label = tk.Label(machine_frame, text=machine_code,
+                                    font=('Consolas', 8),
+                                    bg='white', fg='#5f6368')
+        machine_code_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        tk.Button(machine_frame, text="📋 复制",
+                font=('Microsoft YaHei UI', 8),
+                bg='#f0f2f5', fg='#202124', bd=1,
+                cursor='arrow', relief='raised', padx=8, pady=2,
+                command=lambda: self._copy_to_clipboard(activate_win, machine_code)).pack(side=tk.RIGHT)
+
+        # 激活输入卡片
+        input_card = tk.Frame(content, bg='white')
+        input_card.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(input_card, text="🔑 输入序列号",
+                font=('Microsoft YaHei UI', 12, 'bold'),
+                bg='white', fg='#374151', anchor='w').pack(padx=15, pady=(12, 5))
+
+        tk.Label(input_card, text="请输入管理员提供的验证序列号：",
+                font=('Microsoft YaHei UI', 9),
+                bg='white', fg='#9ca3af', anchor='w').pack(padx=15, pady=(0, 8))
+
+        serial_frame = tk.Frame(input_card, bg='white')
+        serial_frame.pack(fill=tk.X, padx=15, pady=(0, 15))
+
+        serial_entry = tk.Entry(serial_frame,
+                              font=('Consolas', 10),
+                              relief='flat', bg='#f8f9fa', bd=0)
+        serial_entry.pack(fill=tk.X, ipady=8)
+
+        tk.Label(serial_frame, text="格式示例：NQI-xxxx-xxxx-xxxx",
+                font=('Microsoft YaHei UI', 8),
+                bg='white', fg='#9ca3af').pack(anchor='w', pady=(4, 0))
+
+        # 按钮
+        btn_frame = tk.Frame(content, bg='#f9fafb')
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+
+        activate_btn = tk.Button(btn_frame, text="✅ 激活授权",
+                 font=('Microsoft YaHei UI', 11, 'bold'),
+                 bg='#22c55e', fg='white', bd=1,
+                 cursor='hand2', relief='raised', padx=25, pady=8,
+                 command=lambda: self._do_activate(serial_entry.get(), machine_code, activate_win))
+        activate_btn.pack(side=tk.LEFT)
+
+        tk.Button(btn_frame, text="取消",
+                 font=('Microsoft YaHei UI', 10),
+                 bg='#f0f2f5', fg='#202124', bd=1,
+                 cursor='arrow', relief='raised', padx=18, pady=8,
+                 command=activate_win.destroy).pack(side=tk.RIGHT)
+
+        serial_entry.focus()
+
+        # 回车激活
+        serial_entry.bind('<Return>', lambda e: activate_btn.invoke())
+
+    def _do_activate(self, serial_number, machine_code, window):
+        """执行激活操作"""
+        if not serial_number or not serial_number.strip():
+            messagebox.showwarning("提示", "请输入序列号")
+            return
+
+        serial_number = serial_number.strip()
+
+        # 验证序列号
+        success, result = verify_serial_number(serial_number, machine_code)
+
+        if success:
+            # 写入 license.dat
+            write_success, write_msg = write_license_from_serial(result)
+            if write_success:
+                window.destroy()
+                messagebox.showinfo("成功", f"授权激活成功！\n\n过期时间：{result['expiry_time']}")
+                # 重新加载授权信息
+                self._reload_license()
+            else:
+                messagebox.showerror("错误", f"写入授权文件失败：{write_msg}")
+        else:
+            messagebox.showerror("激活失败", result)
+
+    def _reload_license(self):
+        """重新加载授权信息"""
+        from core.license import get_effective_expiry, verify_license, generate_machine_code
+
+        # 重新获取有效过期时间
+        new_expiry = get_effective_expiry()
+        self.expiry_time = new_expiry
+
+        # 重新验证授权
+        from core.license import get_hw_info
+        hw_info = get_hw_info()
+        machine_code = generate_machine_code(hw_info)
+
+        valid, error = verify_license(machine_code)
+
+        if valid:
+            self._update_license_display()
+            self.status_text.config(text="系统就绪")
+            self.status_dot.config(fg='#a5b4fc')
+            self.activate_btn.config(bg='#22c55e')  # 绿色表示已激活
+        else:
+            self.activate_btn.config(bg='#f59e0b')  # 橙色表示需要激活
+
+    def _copy_to_clipboard(self, window, text):
+        """复制到剪贴板"""
+        window.clipboard_clear()
+        window.clipboard_append(text)
+        messagebox.showinfo("成功", "已复制到剪贴板")
