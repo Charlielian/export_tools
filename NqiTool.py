@@ -20,47 +20,26 @@ from gui.main_window import NqiToolGUI
 
 def check_license():
     """检查授权"""
-    print("正在检查授权...")
-
     hw_info = get_hw_info()
     machine_code = generate_machine_code(hw_info)
-
-    print(f"机器码: {machine_code}")
-    print(f"请将机器码发送给管理员获取授权")
-
     valid, error = verify_license(machine_code)
-
-    if not valid:
-        print(f"授权验证失败: {error}")
-        return False, error, machine_code
-
-    print("授权验证通过！")
-    return True, None, machine_code
+    return valid, error, machine_code
 
 
-def show_activate_dialog(machine_code, parent=None):
+def show_activate_dialog(machine_code):
     """显示激活对话框"""
-    root = tk.Toplevel(parent) if parent else tk.Toplevel()
+    root = tk.Tk()
     root.title("授权激活")
     root.geometry("550x420")
     root.resizable(False, False)
-    root.attributes("-topmost", True)
 
     # 居中显示
-    if parent:
-        parent.update_idletasks()
-        x = (parent.winfo_width() - 550) // 2 + parent.winfo_x()
-        y = (parent.winfo_height() - 420) // 2 + parent.winfo_y()
-        root.geometry(f"550x420+{x}+{y}")
-    else:
-        root.withdraw()  # 隐藏根窗口
-        root.update_idletasks()
-        screen_w = root.winfo_screenwidth()
-        screen_h = root.winfo_screenheight()
-        x = (screen_w - 550) // 2
-        y = (screen_h - 420) // 2
-        root.geometry(f"550x420+{x}+{y}")
-        root.deiconify()  # 显示窗口
+    root.update_idletasks()
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    x = (screen_w - 550) // 2
+    y = (screen_h - 420) // 2
+    root.geometry(f"550x420+{x}+{y}")
 
     # 顶部标题
     header = tk.Frame(root, bg='#dc2626', height=50)
@@ -147,7 +126,7 @@ def show_activate_dialog(machine_code, parent=None):
              font=('Microsoft YaHei UI', 11, 'bold'),
              bg='#22c55e', fg='white', bd=1,
              cursor='hand2', relief='raised', padx=20, pady=8,
-             command=lambda: do_activate(serial_entry.get(), machine_code, root))
+             command=lambda: do_activate(serial_entry.get(), machine_code))
     activate_btn.pack(side=tk.LEFT)
 
     tk.Button(btn_frame, text="退出",
@@ -159,9 +138,12 @@ def show_activate_dialog(machine_code, parent=None):
     serial_entry.focus()
 
     # 回车激活
-    serial_entry.bind('<Return>', lambda e: do_activate(serial_entry.get(), machine_code, root))
+    serial_entry.bind('<Return>', lambda e: activate_activate_btn.invoke() if activate_activate_btn.instate(['!disabled']) else None)
 
-    def do_activate(serial_number, current_machine_code, dialog):
+    # 存储 root 引用用于关闭
+    app_root = root
+
+    def do_activate(serial_number, current_machine_code):
         """执行激活操作"""
         if not serial_number or not serial_number.strip():
             hint_label.config(text="请输入序列号", fg='#ef4444')
@@ -169,6 +151,7 @@ def show_activate_dialog(machine_code, parent=None):
 
         serial_number = serial_number.strip()
         hint_label.config(text="正在验证...", fg='#fbbf24')
+        activate_btn.config(state='disabled')
 
         # 验证序列号
         success, result = verify_serial_number(serial_number, current_machine_code)
@@ -178,14 +161,23 @@ def show_activate_dialog(machine_code, parent=None):
             write_success, write_msg = write_license_from_serial(result)
             if write_success:
                 hint_label.config(text="激活成功！正在启动...", fg='#22c55e')
-                dialog.destroy()
-                root.destroy()  # 关闭自己
-                # 继续启动程序
+                app_root.destroy()
+                # 启动主程序
                 start_main_app()
             else:
                 hint_label.config(text=f"写入授权失败：{write_msg}", fg='#ef4444')
+                activate_btn.config(state='normal')
         else:
             hint_label.config(text=result, fg='#ef4444')
+            activate_btn.config(state='normal')
+
+    serial_entry.bind('<Return>', lambda e: do_activate(serial_entry.get(), machine_code))
+
+    def on_closing():
+        sys.exit(1)
+
+    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.mainloop()
 
 
 def start_main_app():
@@ -198,16 +190,11 @@ def start_main_app():
 
 def main():
     """主函数"""
-    print("=" * 60)
-    print("   NQI工具 v1.0")
-    print("   NQI平台数据提取工具")
-    print("=" * 60)
-
     valid, error, machine_code = check_license()
     if not valid:
-        # 显示激活对话框
         show_activate_dialog(machine_code)
-        tk.mainloop()
+    else:
+        start_main_app()
 
 
 if __name__ == '__main__':
