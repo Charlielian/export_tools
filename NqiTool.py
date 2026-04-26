@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
 
-from core.license import get_hw_info, generate_machine_code, verify_license
+from core.license import get_hw_info, generate_machine_code, verify_license, get_effective_expiry
 from gui.main_window import NqiToolGUI
 
 
@@ -105,7 +105,7 @@ def main():
         show_error_dialog_with_gui("授权验证失败", error, machine_code)
         sys.exit(1)
 
-    expiry_time = datetime.strptime("2026-06-30", "%Y-%m-%d")
+    expiry_time = get_effective_expiry()
 
     root = tk.Tk()
     app = NqiToolGUI(root, expiry_time)

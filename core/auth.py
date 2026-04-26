@@ -10,7 +10,7 @@ import json
 from lxml import etree
 
 from utils.config import (
-    DEFAULT_USERNAME, DEFAULT_PASSWORD,
+    DEFAULT_USERNAME, DEFAULT_PASSWORD, BASE_URL,
     LOGIN_URL, CAPTCHA_URL, GET_CONFIG_URL, SEND_CODE_URL, HEADERS, HEADERS_JSON
 )
 from utils.crypto import rsa_encrypt
@@ -25,6 +25,28 @@ class LoginManager:
         self.password = password or DEFAULT_PASSWORD
         self.parent = parent
         self.sess = requests.Session()
+
+    def _update_login_ui(self, **kwargs):
+        """批量更新登录UI状态"""
+        if not self.parent:
+            return
+        for key, value in kwargs.items():
+            self.parent.after(0, lambda k=key, v=value: self._apply_ui_update(k, v))
+
+    def _apply_ui_update(self, key, value):
+        """应用单个UI更新"""
+        if key == 'status_text':
+            self.parent.status_text.config(text=value)
+        elif key == 'status_dot_color':
+            self.parent.status_dot.config(fg=value)
+        elif key == 'login_icon':
+            icon, color = value
+            self.parent.login_status_icon.config(text=icon, fg=color)
+        elif key == 'login_label':
+            label, color = value
+            self.parent.login_status_lbl.config(text=label, fg=color)
+        elif key == 'log':
+            self.parent.log(value[0], value[1])
 
     def login(self, try_times=3):
         """执行登录"""
@@ -57,7 +79,7 @@ class LoginManager:
     def _check_session(self):
         """检查session是否有效"""
         try:
-            url = f'{DEFAULT_USERNAME}/pro-wfm-biz-server/cas/login/info'
+            url = f'{BASE_URL}/pro-wfm-biz-server/cas/login/info'
             res = self.sess.get(url, headers=HEADERS, timeout=10)
             if res.status_code == 200:
                 data = json.loads(res.text)

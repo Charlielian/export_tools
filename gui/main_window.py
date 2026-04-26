@@ -16,6 +16,7 @@ from gui.widgets import LogTextHandler, TableConfig, MultiSelectDropdown
 from core.auth import LoginManager
 from core.query import JXCXQuery
 from core.export import export_with_format
+from core.license import TimeMonitor, invalidate_license
 from utils.logger import set_log_file, ensure_dirs
 from utils.config import LOG_DIR, EXPIRY_DATE, DEFAULT_USERNAME, DEFAULT_PASSWORD
 
@@ -40,6 +41,10 @@ class NqiToolGUI:
         self._create_widgets()
         self._bind_events()
 
+        # 启动时间监控（后台运行，检测时间回拨）
+        self._time_monitor = TimeMonitor(interval=30, callback=self._on_time_rollback)
+        self._time_monitor.start()
+
         self.logger.info("=" * 50)
         self.logger.info("NQI工具 GUI 启动")
         self.logger.info(f"日志文件: {self.log_file_path}")
@@ -49,6 +54,7 @@ class NqiToolGUI:
 
     def _setup_logging(self):
         """设置日志系统"""
+        import logging
         try:
             ensure_dirs()
             log_filename = f"NqiTool_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -65,9 +71,9 @@ class NqiToolGUI:
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
         except Exception as e:
-            print(f"[WARNING] 初始化日志系统失败: {e}")
             self.logger = logging.getLogger()
             self.logger.setLevel(logging.DEBUG)
+            self.logger.warning(f"初始化日志文件失败: {e}，日志将仅输出到界面")
 
     def _create_widgets(self):
         """创建界面组件 - 使用现代化设计"""
@@ -546,6 +552,33 @@ class NqiToolGUI:
         """绑定事件"""
         pass
 
+    def _on_time_rollback(self):
+        """检测到时间回拨时的处理 - 后台静默执行"""
+        # 写入过期的license
+        invalidate_license()
+        # 强制退出程序
+        self.root.after(0, self._force_exit)
+
+    def _force_exit(self):
+        """强制退出程序"""
+        import os
+        os._exit(1)
+
+    def _update_login_failed_ui(self):
+        """批量更新登录失败UI"""
+        self.status_text.config(text="登录失败")
+        self.status_dot.config(fg='#ef4444')
+        self.login_status_icon.config(text="○", fg='#ef4444')
+        self.login_status_lbl.config(text="登录失败", fg='#ef4444')
+
+    def _update_login_error_ui(self, message):
+        """批量更新登录异常UI"""
+        self.status_text.config(text="登录异常")
+        self.status_dot.config(fg='#ef4444')
+        self.login_status_icon.config(text="○", fg='#ef4444')
+        self.login_status_lbl.config(text="登录异常", fg='#ef4444')
+        self.log(f"登录异常: {message}", "ERROR")
+
     def _on_category_changed(self, category):
         """数据分类选择事件"""
         self.log(f"选择了数据分类: {category}", "INFO")
@@ -571,6 +604,11 @@ class NqiToolGUI:
 
     def _show_field_selector(self):
         """显示字段选择窗口"""
+        # 检查登录状态
+        if not self.jxcx:
+            messagebox.showwarning("警告", "请先登录后再选择字段")
+            return
+
         selected_tables = self.table_dropdown.get_selected()
         if not selected_tables:
             messagebox.showwarning("警告", "请先选择数据表")
@@ -625,7 +663,7 @@ class NqiToolGUI:
                             self.field_configs[table_name] = configs
                             self.log(f"获取到 {table_name} 的 {len(configs)} 个字段", "SUCCESS")
                         else:
-                            self.log(f"获取 {table_name} 的字段配置失败", "ERROR")
+                            self.log(f"获取 {table_name} 的字段配置失败，可能该报表不支持自定义字段", "WARNING")
                     except Exception as e:
                         self.log(f"获取字段配置异常: {e}", "ERROR")
 
@@ -735,17 +773,10 @@ class NqiToolGUI:
                 self.jxcx = JXCXQuery(self.session)
                 self.root.after(0, self._on_login_success)
             else:
+                self.root.after(0, self._update_login_failed_ui)
                 self.root.after(0, lambda: self.log("登录失败", "ERROR"))
-                self.root.after(0, lambda: self.status_text.config(text="登录失败"))
-                self.root.after(0, lambda: self.status_dot.config(fg='#ef4444'))  # 红色
-                self.root.after(0, lambda: self.login_status_icon.config(text="○", fg='#ef4444'))
-                self.root.after(0, lambda: self.login_status_lbl.config(text="登录失败", fg='#ef4444'))
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"登录异常: {e}", "ERROR"))
-            self.root.after(0, lambda: self.status_text.config(text="登录异常"))
-            self.root.after(0, lambda: self.status_dot.config(fg='#ef4444'))  # 红色
-            self.root.after(0, lambda: self.login_status_icon.config(text="○", fg='#ef4444'))
-            self.root.after(0, lambda: self.login_status_lbl.config(text="登录异常", fg='#ef4444'))
+            self.root.after(0, lambda msg=str(e): self._update_login_error_ui(msg))
 
     def _on_login_success(self):
         """登录成功回调"""
@@ -806,6 +837,11 @@ class NqiToolGUI:
                 if table_config:
                     self.jxcx.enter_jxcx()
 
+                    # 获取维度参数和字段配置
+                    dimension = table_config.get('dimension', {})
+                    fields = table_config.get('fields', None)
+
+                    # 构建查询条件
                     conditions = table_config.get('default_conditions', []).copy()
                     conditions.append({'field': 'starttime', 'operator': '>=', 'value': start_date})
                     conditions.append({'field': 'starttime', 'operator': '<=', 'value': end_date})
@@ -816,7 +852,9 @@ class NqiToolGUI:
                         table_config['table_key'],
                         table_config['fieldtype'],
                         conditions,
-                        table_config['api_type']
+                        table_config['api_type'],
+                        dimension_override=dimension if dimension else None,
+                        fields_override=fields
                     )
 
                     if payload:
@@ -825,14 +863,19 @@ class NqiToolGUI:
                             # 应用自定义字段选择
                             if self.custom_fields_var.get() and table_name in self.selected_fields:
                                 selected_field_keys = self.selected_fields[table_name]
-                                # 过滤出选中的字段
+                                # 尝试使用原始字段名匹配
                                 available_fields = [col for col in df.columns if col in selected_field_keys]
+                                # 如果直接匹配失败，尝试使用中文字段名匹配
+                                if not available_fields and table_name in self.field_configs:
+                                    config_map = {c.get('columnname'): c.get('columnname') for c in self.field_configs[table_name]}
+                                    for col in df.columns:
+                                        if col in config_map and config_map[col] in selected_field_keys:
+                                            available_fields.append(col)
                                 if available_fields:
                                     df = df[available_fields]
                                     self.log(f"应用自定义字段: {len(available_fields)} 个字段", "INFO")
                                 else:
-                                    self.log(f"没有选中的字段可用", "WARNING")
-                                    continue
+                                    self.log(f"没有选中的字段可用，将导出全部字段", "WARNING")
 
                             # 导出数据到Excel
                             import os
@@ -896,4 +939,11 @@ class NqiToolGUI:
 
     def run(self):
         """运行应用"""
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.root.mainloop()
+
+    def _on_closing(self):
+        """窗口关闭事件"""
+        if hasattr(self, '_time_monitor'):
+            self._time_monitor.stop()
+        self.root.destroy()

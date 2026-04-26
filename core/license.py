@@ -10,6 +10,8 @@ import subprocess
 import os
 import struct
 import base64
+import threading
+import time
 
 from datetime import datetime
 
@@ -174,9 +176,17 @@ def verify_license(machine_code):
             decrypted = aes_decrypt(encrypted_bytes, AES_KEY)
             expiry_str = decrypted.split('|')[0]
 
-            expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
-            if datetime.now() > expiry_date:
-                return False, f"授权已过期（{expiry_str}）"
+            license_expiry = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
+
+            # 从config获取软件硬编码的过期日期
+            software_expiry = datetime.strptime(EXPIRY_DATE, "%Y-%m-%d")
+
+            # 取两个日期中较早的一个
+            effective_expiry = min(license_expiry, software_expiry)
+
+            if datetime.now() > effective_expiry:
+                earlier_source = "license.dat" if effective_expiry == license_expiry else "软件"
+                return False, f"授权已过期（{earlier_source}: {effective_expiry.strftime('%Y-%m-%d')}）"
 
             return True, None
         except Exception as e:
@@ -184,3 +194,128 @@ def verify_license(machine_code):
 
     except Exception as e:
         return False, f"授权验证失败: {str(e)}"
+
+
+def get_effective_expiry():
+    """获取实际有效的过期日期（license.dat和软件硬编码中较早的一个）
+
+    Returns:
+        datetime: 有效的过期日期时间对象
+    """
+    license_expiry = None
+    license_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', LICENSE_FILE)
+
+    if os.path.exists(license_file):
+        try:
+            with open(license_file, 'rb') as f:
+                license_data = f.read()
+            parts = license_data.split(b'|')
+            if len(parts) >= 2:
+                encrypted_data = parts[1]
+                AES_KEY = b"GMCCLicenseV2Key"
+                encrypted_bytes = base64.b64decode(encrypted_data)
+                decrypted = aes_decrypt(encrypted_bytes, AES_KEY)
+                expiry_str = decrypted.split('|')[0]
+                license_expiry = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    software_expiry = datetime.strptime(EXPIRY_DATE, "%Y-%m-%d")
+
+    if license_expiry:
+        return min(license_expiry, software_expiry)
+    return software_expiry
+
+
+def invalidate_license():
+    """
+    将license.dat文件写入过期的授权代码
+    这会使下次启动时授权验证失败
+    """
+    license_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', LICENSE_FILE)
+    try:
+        # 写入一个过期的授权数据
+        # 格式: 4字节长度 + 序列号 + 签名 | 加密数据
+        expired_date = "2020-01-01 00:00:00"
+        encrypted_data = base64.b64encode(aes_encrypt(expired_date + "|invalidated", b"GMCCLicenseV2Key"))
+        sn = "TIME_TAMPERED"
+        sn_bytes = sn.encode('utf-8')
+        sn_len_bytes = struct.pack(">I", len(sn_bytes))
+
+        # 生成一个假的签名（时间被篡改的标记）
+        fake_signature = hashlib.sha256(sn_bytes + encrypted_data + b"tampered").hexdigest()
+
+        with open(license_file, 'wb') as f:
+            f.write(sn_len_bytes + sn_bytes + fake_signature.encode('utf-8') + b'|' + encrypted_data)
+        return True
+    except Exception:
+        return False
+
+
+def aes_encrypt(plaintext, key):
+    """AES加密（与utils/crypto.py保持一致的CBC模式）"""
+    import os
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad
+
+    iv = os.urandom(16)
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    padded_text = pad(plaintext.encode('utf-8'), 16)
+    encrypted = cipher.encrypt(padded_text)
+    return iv + encrypted
+
+
+class TimeMonitor:
+    """系统时间监控器 - 后台运行，检测时间回拨"""
+
+    def __init__(self, interval=30, callback=None):
+        self.interval = interval
+        self.callback = callback
+        self.last_time = None
+        self.running = False
+        self._thread = None
+
+    def _check_time(self):
+        """检查时间是否回拨"""
+        current_time = time.time()
+
+        if self.last_time is not None:
+            if current_time < self.last_time:
+                # 检测到时间回拨
+                return True
+
+        self.last_time = current_time
+        return False
+
+    def _monitor_loop(self):
+        """监控循环"""
+        # 初始化基准时间
+        self.last_time = time.time()
+
+        while self.running:
+            time.sleep(self.interval)
+
+            if not self.running:
+                break
+
+            if self._check_time():
+                if self.callback:
+                    self.callback()
+                self.running = False
+                break
+
+    def start(self):
+        """启动监控"""
+        if self.running:
+            return
+
+        self.running = True
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """停止监控"""
+        self.running = False
+        if self._thread:
+            self._thread.join(timeout=1)
+            self._thread = None

@@ -302,31 +302,348 @@ class MultiSelectDropdown(ttk.Frame):
 class TableConfig:
     """数据表配置类"""
 
+    # 5G干扰小区字段配置
+    INTERFERENCE_5G_FIELDS = [
+        {'feild': 'starttime', 'feildName': '数据时间', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'endtime', 'feildName': '结束时间', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'cgi', 'feildName': 'CGI', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'cell_name', 'feildName': '小区名', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'freq', 'feildName': '频段', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'micro_grid', 'feildName': '微网格标识', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'averagevalue', 'feildName': '全频段均值', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'averagevalued1', 'feildName': 'D1均值', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'averagevalued2', 'feildName': 'D2均值', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'is_interfere_5g', 'feildName': '是否干扰小区', 'datatype': 'character varying', 'columntype': '1'},
+    ]
+
+    # 4G干扰小区字段配置
+    INTERFERENCE_4G_FIELDS = [
+        {'feild': 'starttime', 'feildName': '数据时间', 'datatype': '1', 'columntype': '1'},
+        {'feild': 'endtime', 'feildName': '结束时间', 'datatype': '1', 'columntype': '1'},
+        {'feild': 'cgi', 'feildName': 'CGI', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'cell_name', 'feildName': '小区名', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'freq', 'feildName': '频段', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'micro_grid', 'feildName': '微网格标识', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'bandwidth', 'feildName': '系统带宽', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'averagevalue', 'feildName': '平均干扰电平', 'datatype': 'character varying', 'columntype': '1'},
+        {'feild': 'is_interfere', 'feildName': '是否干扰小区', 'datatype': 'character varying', 'columntype': '1'},
+    ]
+
     TABLE_CONFIGS = {
-        '4G干扰小区': {
-            'name': '4G干扰小区',
-            'table_key': '4G干扰小区',
-            'fieldtype': 'grid',
-            'api_type': 'search',
-            'default_conditions': [
-                {'field': 'city', 'operator': 'like', 'value': '%%'},
-            ]
-        },
+        # ========== 干扰类 ==========
         '5G干扰小区': {
             'name': '5G干扰小区',
-            'table_key': '5G干扰小区',
-            'fieldtype': 'grid',
+            'table_key': '5G干扰报表（忙时）',
+            'table_name': 'appdbv3.a_interfere_nr_cell_zb2_d',
+            'fieldtype': '5G干扰报表（忙时）',
             'api_type': 'search',
             'default_conditions': [
                 {'field': 'city', 'operator': 'like', 'value': '%%'},
-            ]
+            ],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            },
+            'fields': INTERFERENCE_5G_FIELDS,
         },
+        '4G干扰小区': {
+            'name': '4G干扰小区',
+            'table_key': '4G干扰报表（忙时）',
+            'table_name': 'appdbv3.a_interfere_lte_cell_zb2_d',
+            'fieldtype': '4G干扰报表（忙时）',
+            'api_type': 'search',
+            'default_conditions': [
+                {'field': 'city', 'operator': 'like', 'value': '%%'},
+            ],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            },
+            'fields': INTERFERENCE_4G_FIELDS,
+        },
+
+        # ========== 容量类 ==========
         '5G小区容量报表': {
             'name': '5G小区容量报表',
-            'table_key': '5G小区容量报表',
-            'fieldtype': 'grid',
+            'table_key': '5G小区容量报表 - 天粒度',
+            'table_name': 'appdbv3.a_adhoc_capacity_nr_nrcell_d',
+            'fieldtype': '5G小区容量报表 - 天粒度',
             'api_type': 'table',
-            'default_conditions': []
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'ncgi',
+                'timeField': 'starttime',
+                'cellField': 'nrcell',
+                'cityField': 'city',
+            }
+        },
+        '重要场景-天': {
+            'name': '重要场景-天',
+            'table_key': '重要场景-小区天',
+            'table_name': 'appdbv3.a_overview_ispm_lte_cell_d',
+            'fieldtype': '重要场景-小区天',
+            'api_type': 'table',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+
+        # ========== 工参类 ==========
+        '5G小区工参报表': {
+            'name': '5G小区工参报表',
+            'table_key': 'appdbv3.a_common_cfg_nr_cellant_d',
+            'table_name': 'appdbv3.a_common_cfg_nr_cellant_d',
+            'fieldtype': '5G小区工参',
+            'api_type': 'table',
+            'is_gongcan': True,
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区，网格，地市，分公司',
+                'timedimension': '天粒度',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+        '4G小区工参报表': {
+            'name': '4G小区工参报表',
+            'table_key': 'appdbv3.v_a_common_cfg_lte_cellant_d',
+            'table_name': 'appdbv3.v_a_common_cfg_lte_cellant_d',
+            'fieldtype': '4G小区工参',
+            'api_type': 'table',
+            'is_gongcan': True,
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区，网格，地市，分公司',
+                'timedimension': '天粒度',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+
+        # ========== MR覆盖类 ==========
+        '5GMR覆盖-小区天': {
+            'name': '5GMR覆盖-小区天',
+            'table_key': 'appdbv3.a_common_mro_scssrsrp_nr_nrcell',
+            'table_name': 'appdbv3.a_common_mro_scssrsrp_nr_nrcell',
+            'fieldtype': '应用_5GMRO_RSRP基础性能_小区',
+            'api_type': 'table',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'ncgi',
+                'timeField': 'starttime',
+                'cellField': 'nrcell',
+                'cityField': 'city',
+            }
+        },
+        '4GMR覆盖-小区天': {
+            'name': '4GMR覆盖-小区天',
+            'table_key': 'appdbv3.a_common_mro_rsrp_lte_cell',
+            'table_name': 'appdbv3.a_common_mro_rsrp_lte_cell',
+            'fieldtype': '应用_4GMRO_RSRP基础性能_小区',
+            'api_type': 'table',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+
+        # ========== 语音报表类 ==========
+        'VoLTE小区监控预警': {
+            'name': 'VoLTE小区监控预警',
+            'table_key': 'volte小区监控预警',
+            'table_name': '',
+            'fieldtype': 'VoLTE小区监控预警数据表-天',
+            'api_type': 'search',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+        'VONR小区监控预警': {
+            'name': 'VONR小区监控预警',
+            'table_key': 'vonr',
+            'table_name': '',
+            'fieldtype': 'VONR小区监控预警数据表-天',
+            'api_type': 'search',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'ncgi',
+                'timeField': 'starttime',
+                'cellField': 'nrcell',
+                'cityField': 'city',
+            }
+        },
+        'EPSFB小区监控预警': {
+            'name': 'EPSFB小区监控预警',
+            'table_key': 'EPSFB',
+            'table_name': '',
+            'fieldtype': 'EPSFB小区监控预警数据表-天',
+            'api_type': 'search',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+
+        # ========== 小区性能类 ==========
+        '5G小区性能KPI报表': {
+            'name': '5G小区性能KPI报表',
+            'table_key': 'appdbv3.a_common_pm_sacu',
+            'table_name': 'appdbv3.a_common_pm_sacu',
+            'fieldtype': 'SA_CU性能',
+            'api_type': 'table',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'ncgi',
+                'timeField': 'starttime',
+                'cellField': 'nrcell',
+                'cityField': 'city',
+            }
+        },
+        '4G小区性能KPI报表': {
+            'name': '4G小区性能KPI报表',
+            'table_key': 'appdbv3.a_common_pm_lte',
+            'table_name': 'appdbv3.a_common_pm_lte',
+            'fieldtype': '公共信息（小区级粒度）',
+            'api_type': 'table',
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+
+        # ========== 全程完好率类 ==========
+        '4G全程完好率报表': {
+            'name': '4G全程完好率报表',
+            'table_key': 'appdbv3.a_common_pm_lte',
+            'table_name': 'appdbv3.a_common_pm_lte',
+            'fieldtype': '公共信息（小区级粒度）',
+            'api_type': 'table',
+            'calc_columns': ['4G全程完好率', '4G是否差小区'],
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+        '5G全程完好率报表': {
+            'name': '5G全程完好率报表',
+            'table_key': 'appdbv3.a_common_pm_sacu',
+            'table_name': 'appdbv3.a_common_pm_sacu',
+            'fieldtype': 'SA_CU性能',
+            'api_type': 'table',
+            'calc_columns': ['5G全程完好率', '5G是否差小区'],
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'ncgi',
+                'timeField': 'starttime',
+                'cellField': 'nrcell',
+                'cityField': 'city',
+            }
+        },
+
+        # ========== 语音小区类 ==========
+        '4G语音小区': {
+            'name': '4G语音小区',
+            'table_key': 'volte小区监控预警',  # 实际会分别查询VoLTE和EPSFB
+            'fieldtype': 'VoLTE小区监控预警数据表-天',
+            'api_type': 'search',
+            'is_4g_voice': True,  # 标记为4G语音小区，需要VoLTE+EPSFB合并
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'enodeb_id',
+                'cgiField': 'cgi',
+                'timeField': 'starttime',
+                'cellField': 'cell',
+                'cityField': 'city',
+            }
+        },
+        '5G语音小区': {
+            'name': '5G语音小区',
+            'table_key': 'vonr',
+            'table_name': '',
+            'fieldtype': 'VONR小区监控预警数据表-天',
+            'api_type': 'search',
+            'calc_columns': ['5G语音小区'],
+            'default_conditions': [],
+            'dimension': {
+                'geographicdimension': '小区',
+                'timedimension': '天',
+                'enodebField': 'gnodeb_id',
+                'cgiField': 'ncgi',
+                'timeField': 'starttime',
+                'cellField': 'nrcell',
+                'cityField': 'city',
+            }
         },
     }
 

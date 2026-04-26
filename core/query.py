@@ -4,6 +4,7 @@
 负责即席查询、数据获取和分批处理
 """
 
+import logging
 import requests
 import json
 import random
@@ -15,6 +16,8 @@ from utils.config import (
     BASE_URL, JXCX_URL, JXCX_COUNT_URL, JXCX_SEARCH_URL, JXCX_TABLE_URL,
     HEADERS, MAX_SINGLE_QUERY
 )
+
+logger = logging.getLogger(__name__)
 
 
 class JXCXQuery:
@@ -29,10 +32,10 @@ class JXCXQuery:
         """动态获取表字段配置（从API获取）"""
         cache_key = f"{table_key}_{fieldtype}_{api_type}"
         if cache_key in self._field_config_cache:
-            print(f"[DEBUG-FIELD] 使用缓存的字段配置: {cache_key}")
+            logger.debug("使用缓存的字段配置: %s", cache_key)
             return self._field_config_cache[cache_key]
 
-        print(f"[DEBUG-FIELD] 动态获取字段配置: table_key={table_key}, fieldtype={fieldtype}, api_type={api_type}")
+        logger.debug("动态获取字段配置: table_key=%s, fieldtype=%s, api_type=%s", table_key, fieldtype, api_type)
 
         try:
             if api_type == 'table':
@@ -42,12 +45,12 @@ class JXCXQuery:
                 if res.status_code == 200:
                     result = json.loads(res.content)
                     configs = result.get('CFG_ADHOC_CONF_TABLE', [])
-                    print(f"[DEBUG-FIELD] 从getSelectTable接口获取到 {len(configs)} 个字段配置")
+                    logger.debug("从getSelectTable接口获取到 %d 个字段配置", len(configs))
 
                     self._field_config_cache[cache_key] = configs
                     return configs
                 else:
-                    print(f"[ERROR-FIELD] 获取字段配置失败: {res.status_code}")
+                    logger.error("获取字段配置失败: %s", res.status_code)
                     return None
             else:
                 data = {
@@ -66,49 +69,81 @@ class JXCXQuery:
                 if res.status_code == 200:
                     result = json.loads(res.content)
                     configs = result.get('CFG_ADHOC_CONF_SEARCH', [])
-                    print(f"[DEBUG-FIELD] 从search接口获取到 {len(configs)} 个字段配置")
+                    logger.debug("从search接口获取到 %d 个字段配置", len(configs))
 
                     self._field_config_cache[cache_key] = configs
                     return configs
                 else:
-                    print(f"[ERROR-FIELD] 获取字段配置失败: {res.status_code}")
+                    logger.error("获取字段配置失败: %s", res.status_code)
                     return None
         except Exception as e:
-            print(f"[ERROR-FIELD] 获取字段配置异常: {e}")
+            logger.error("获取字段配置异常: %s", e)
             return None
 
-    def build_payload_from_config(self, table_key, fieldtype, where_conditions, api_type='search'):
-        """从动态获取的字段配置构建payload"""
+    def build_payload_from_config(self, table_key, fieldtype, where_conditions, api_type='search',
+                                  dimension_override=None, fields_override=None):
+        """从动态获取的字段配置构建payload
+
+        Args:
+            table_key: API查询关键字
+            fieldtype: 字段类型过滤条件
+            where_conditions: 查询条件列表
+            api_type: API类型，'search'使用adhocquery/search接口，'table'使用adhocquery/getSelectTable接口
+            dimension_override: 可选的维度参数覆盖，如果提供则使用此参数而非API返回
+            fields_override: 可选的字段列表覆盖，如果提供则使用此字段列表构建payload
+        """
         configs = self.get_field_config(table_key, fieldtype, api_type)
         if not configs:
+            # 如果动态获取失败，尝试使用 fields_override
+            if fields_override:
+                return self._build_payload_with_fields(
+                    table_key, fieldtype, where_conditions, api_type,
+                    dimension_override, fields_override
+                )
             return None
 
-        print(f"[DEBUG-PAYLOAD] API返回的字段配置数量: {len(configs)}")
-        print(f"[DEBUG-PAYLOAD] API返回的字段名(前10个): {[c.get('columnname', '') for c in configs[:10]]}")
-        print(f"[DEBUG-PAYLOAD] API返回的fieldtype(前3个): {list(set(c.get('fieldtype', '') for c in configs[:3]))}")
+        logger.debug("API返回的字段配置数量: %d", len(configs))
+        logger.debug("API返回的字段名(前10个): %s", [c.get('columnname', '') for c in configs[:10]])
+        logger.debug("API返回的fieldtype(前3个): %s", list(set(c.get('fieldtype', '') for c in configs[:3])))
 
         sorted_configs = sorted(configs, key=lambda x: x.get('sort', 0))
 
         first_config = sorted_configs[0]
-        geographicdimension = first_config.get('geographicdimension', '小区')
-        timedimension = first_config.get('timedimension', '天')
-        enodeb_field = first_config.get('enodeb_field', 'enodeb_id')
-        cgi_field = first_config.get('cgi_field', 'cgi')
-        time_field = first_config.get('time_field', 'starttime')
-        cell_field = first_config.get('cell_field', 'cell')
-        city_field = first_config.get('city_field', 'city')
 
-        print(f"[DEBUG-PAYLOAD] 从API获取维度参数:")
-        print(f"  geographicdimension: {geographicdimension}")
-        print(f"  timedimension: {timedimension}")
-        print(f"  enodebField: {enodeb_field}")
-        print(f"  cgiField: {cgi_field}")
-        print(f"  timeField: {time_field}")
-        print(f"  cellField: {cell_field}")
-        print(f"  cityField: {city_field}")
+        # 如果提供了维度覆盖参数，则使用覆盖参数；否则使用API返回的参数
+        if dimension_override:
+            geographicdimension = dimension_override.get('geographicdimension', '小区')
+            timedimension = dimension_override.get('timedimension', '天')
+            enodeb_field = dimension_override.get('enodebField', 'enodeb_id')
+            cgi_field = dimension_override.get('cgiField', 'cgi')
+            time_field = dimension_override.get('timeField', 'starttime')
+            cell_field = dimension_override.get('cellField', 'cell')
+            city_field = dimension_override.get('cityField', 'city')
+        else:
+            geographicdimension = first_config.get('geographicdimension', '小区')
+            timedimension = first_config.get('timedimension', '天')
+            enodeb_field = first_config.get('enodeb_field', 'enodeb_id')
+            cgi_field = first_config.get('cgi_field', 'cgi')
+            time_field = first_config.get('time_field', 'starttime')
+            cell_field = first_config.get('cell_field', 'cell')
+            city_field = first_config.get('city_field', 'city')
 
+        logger.debug("使用的维度参数: geographicdimension=%s, timedimension=%s", geographicdimension, timedimension)
+        logger.debug("  enodebField=%s, cgiField=%s, timeField=%s, cellField=%s, cityField=%s",
+                    enodeb_field, cgi_field, time_field, cell_field, city_field)
+
+        # 如果提供了字段覆盖，则使用覆盖的字段配置
+        if fields_override:
+            return self._build_payload_with_field_configs(
+                table_key, fieldtype, where_conditions, api_type,
+                geographicdimension, timedimension, enodeb_field, cgi_field,
+                time_field, cell_field, city_field, fields_override
+            )
+
+        # 构建字段列表
         field_list = [c['columnname'] for c in sorted_configs]
 
+        # 构建columns参数
         columns = []
         for field in field_list:
             columns.append({
@@ -119,6 +154,7 @@ class JXCXQuery:
                 'search': {'value': '', 'regex': False}
             })
 
+        # 构建result参数
         table_name = first_config.get('tablename', '')
         table_name_cn = first_config.get('tablename_cn', '')
         supporteddimension = first_config.get('supporteddimension')
@@ -166,16 +202,151 @@ class JXCXQuery:
             'indexcount': 0
         }
 
-        print(f"[DEBUG-PAYLOAD] 构建的payload包含 {len(columns)} 个字段")
+        logger.debug("构建的payload包含 %d 个字段", len(columns))
+        return payload
+
+    def _build_payload_with_fields(self, table_key, fieldtype, where_conditions, api_type,
+                                   dimension_override, fields_list):
+        """使用字段列表构建payload（当API获取失败时使用）"""
+        geographicdimension = dimension_override.get('geographicdimension', '小区')
+        timedimension = dimension_override.get('timedimension', '天')
+        enodeb_field = dimension_override.get('enodebField', 'enodeb_id')
+        cgi_field = dimension_override.get('cgiField', 'cgi')
+        time_field = dimension_override.get('timeField', 'starttime')
+        cell_field = dimension_override.get('cellField', 'cell')
+        city_field = dimension_override.get('cityField', 'city')
+        table_name = dimension_override.get('table_name', '')
+
+        # 构建columns
+        columns = []
+        for field in fields_list:
+            columns.append({
+                'data': field,
+                'name': '',
+                'searchable': True,
+                'orderable': True,
+                'search': {'value': '', 'regex': False}
+            })
+
+        # 构建result
+        result_list = []
+        for field in fields_list:
+            result_list.append({
+                'feildtype': fieldtype,
+                'table': table_name,
+                'tableName': '',
+                'datatype': 'character varying',
+                'columntype': '1',
+                'feildName': field,
+                'feild': field,
+                'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'
+            })
+
+        result = {
+            'result': result_list,
+            'tableParams': {
+                'supporteddimension': None,
+                'supportedtimedimension': ''
+            },
+            'columnname': ''
+        }
+
+        payload = {
+            'draw': 1,
+            'start': 0,
+            'length': 200,
+            'total': 0,
+            'geographicdimension': geographicdimension,
+            'timedimension': timedimension,
+            'enodebField': enodeb_field,
+            'cgiField': cgi_field,
+            'timeField': time_field,
+            'cellField': cell_field,
+            'cityField': city_field,
+            'columns': columns,
+            'order': [{'column': 0, 'dir': 'desc'}],
+            'search': {'value': '', 'regex': False},
+            'result': result,
+            'where': where_conditions,
+            'indexcount': 0
+        }
+
+        logger.debug("使用字段列表构建payload，包含 %d 个字段", len(columns))
+        return payload
+
+    def _build_payload_with_field_configs(self, table_key, fieldtype, where_conditions, api_type,
+                                          geographicdimension, timedimension, enodeb_field, cgi_field,
+                                          time_field, cell_field, city_field, fields_override):
+        """使用字段配置列表构建payload"""
+        # fields_override 是一个字典列表，每个字典包含字段配置
+        columns = []
+        result_list = []
+        table_name = ''
+
+        for config in fields_override:
+            field = config.get('feild', config.get('columnname', ''))
+            if not field:
+                continue
+
+            columns.append({
+                'data': field,
+                'name': '',
+                'searchable': True,
+                'orderable': True,
+                'search': {'value': '', 'regex': False}
+            })
+
+            table_name = config.get('table', table_name)
+            result_list.append({
+                'feildtype': config.get('feildtype', fieldtype),
+                'table': config.get('table', table_name),
+                'tableName': config.get('tableName', ''),
+                'datatype': config.get('datatype', 'character varying'),
+                'columntype': config.get('columntype', '1'),
+                'feildName': config.get('feildName', field),
+                'feild': field,
+                'poly': '无', 'anyWay': '无', 'chart': '无', 'chartpoly': '无'
+            })
+
+        result = {
+            'result': result_list,
+            'tableParams': {
+                'supporteddimension': None,
+                'supportedtimedimension': ''
+            },
+            'columnname': ''
+        }
+
+        payload = {
+            'draw': 1,
+            'start': 0,
+            'length': 200,
+            'total': 0,
+            'geographicdimension': geographicdimension,
+            'timedimension': timedimension,
+            'enodebField': enodeb_field,
+            'cgiField': cgi_field,
+            'timeField': time_field,
+            'cellField': cell_field,
+            'cityField': city_field,
+            'columns': columns,
+            'order': [{'column': 0, 'dir': 'desc'}],
+            'search': {'value': '', 'regex': False},
+            'result': result,
+            'where': where_conditions,
+            'indexcount': 0
+        }
+
+        logger.debug("使用字段配置构建payload，包含 %d 个字段", len(columns))
         return payload
 
     def enter_jxcx(self, retry_times=3, timeout=60):
         """进入即席查询模块"""
-        print("\n[DEBUG-JXCX] ========== 进入即席查询模块 ==========")
+        logger.info("========== 进入即席查询模块 ==========")
 
         for attempt in range(retry_times):
             if attempt > 0:
-                print(f"\n[DEBUG-JXCX] 重试第 {attempt} 次...")
+                logger.info("重试第 %d 次...", attempt)
 
             try:
                 castgc = self.sess.cookies.get('CASTGC', domain='nqi.gmcc.net')
@@ -183,10 +354,10 @@ class JXCXQuery:
                     castgc = self.sess.cookies.get('CASTGC')
 
                 if not castgc:
-                    print("[ERROR-JXCX] 未找到CASTGC cookie")
+                    logger.error("未找到CASTGC cookie")
                     continue
 
-                print(f"[DEBUG-JXCX] CASTGC获取成功: {castgc[:20]}...")
+                logger.debug("CASTGC获取成功: %s...", castgc[:20] if len(castgc) >= 20 else castgc)
 
                 url = f'{BASE_URL}/pro-portal/pure/urlAction.action'
                 params = {
@@ -197,33 +368,33 @@ class JXCXQuery:
                 }
 
                 url_with_params = f"{url}?url={params['url']}&__PID={params['__PID']}&random={params['random']}&token={params['token']}"
-                print(f"[DEBUG-JXCX] 请求URL: {url_with_params[:200]}...")
+                logger.debug("请求URL: %s...", url_with_params[:200] if len(url_with_params) >= 200 else url_with_params)
 
                 start_time = time.time()
                 res = self.sess.get(url_with_params, headers=HEADERS, timeout=timeout)
                 elapsed_time = time.time() - start_time
 
-                print(f"[DEBUG-JXCX] 响应状态码: {res.status_code}, 耗时: {elapsed_time:.2f}秒")
+                logger.debug("响应状态码: %s, 耗时: %.2f秒", res.status_code, elapsed_time)
 
                 if res.status_code == 200:
                     self.enabled = True
-                    print("[SUCCESS-JXCX] 即席查询模块初始化成功！")
+                    logger.info("即席查询模块初始化成功！")
                     return True
                 else:
-                    print(f"[ERROR-JXCX] 进入即席查询失败，状态码: {res.status_code}")
+                    logger.error("进入即席查询失败，状态码: %s", res.status_code)
                     continue
 
             except requests.exceptions.Timeout:
-                print(f"[ERROR-JXCX] 请求超时 (timeout={timeout}s)")
+                logger.error("请求超时 (timeout=%ds)", timeout)
                 continue
             except requests.exceptions.ConnectionError as e:
-                print(f"[ERROR-JXCX] 网络连接错误: {e}")
+                logger.error("网络连接错误: %s", e)
                 continue
             except Exception as e:
-                print(f"[ERROR-JXCX] 未知错误: {e}")
+                logger.error("未知错误: %s", e)
                 continue
 
-        print(f"[ERROR-JXCX] 进入即席查询失败，已尝试 {retry_times} 次")
+        logger.error("进入即席查询失败，已尝试 %d 次", retry_times)
         return False
 
     def get_table_count(self, payload):
@@ -237,46 +408,45 @@ class JXCXQuery:
         payload_count = {key: value for key, value in payload.items() if key in key_list}
         payload_encoded = self._encode_payload(payload_count)
 
-        print(f"[DEBUG-COUNT] 查询总数 URL: {JXCX_COUNT_URL}")
-        print(f"[DEBUG-COUNT] 查询参数 (前500字符): {payload_encoded[:500]}...")
+        logger.debug("查询总数 URL: %s", JXCX_COUNT_URL)
+        logger.debug("查询参数 (前500字符): %s...", payload_encoded[:500] if len(payload_encoded) >= 500 else payload_encoded)
 
         try:
             res = self.sess.post(JXCX_COUNT_URL, data=payload_encoded, headers=HEADERS, timeout=180)
-            print(f"[DEBUG-COUNT] 响应状态码: {res.status_code}")
+            logger.debug("响应状态码: %s", res.status_code)
 
             if res.status_code == 200:
                 if not res.content or len(res.content.strip()) == 0:
-                    print(f"[ERROR-COUNT] 响应内容为空，可能是Session过期")
+                    logger.error("响应内容为空，可能是Session过期")
                     self.enabled = False
                     return 0
 
                 try:
                     result = json.loads(res.content)
                 except json.JSONDecodeError as e:
-                    print(f"[ERROR-COUNT] JSON解析失败: {e}")
-                    print(f"[ERROR-COUNT] 响应内容 (前500字符): {res.text[:500]}")
+                    logger.error("JSON解析失败: %s", e)
+                    logger.debug("响应内容 (前500字符): %s...", res.text[:500] if len(res.text) >= 500 else res.text)
                     self.enabled = False
                     return 0
 
-                print(f"[DEBUG-COUNT] 响应内容: {result}")
+                logger.debug("响应内容: %s", result)
 
                 if 'message' in result and result['message']:
                     msg = str(result['message'])
-                    print(f"[WARNING-COUNT] 服务器返回消息: {msg}")
+                    logger.warning("服务器返回消息: %s", msg)
                     if '不存在' in msg:
-                        print(f"[WARNING-COUNT] 数据不存在，返回0")
+                        logger.warning("数据不存在，返回0")
                         return 0
 
                 count = result.get('count', result.get('data', {}).get('total', 1000000))
-                print(f"[DEBUG-COUNT] 查询到的数据行数: {count}")
+                logger.info("查询到的数据行数: %d", count)
                 return count
         except Exception as e:
-            print(f"[ERROR-COUNT] 查询异常: {e}")
+            logger.error("查询异常: %s", e)
             import traceback
             traceback.print_exc()
-            pass
 
-        print(f"[WARNING-COUNT] 查询超时，返回MAX_SINGLE_QUERY({MAX_SINGLE_QUERY})")
+        logger.warning("查询超时，返回MAX_SINGLE_QUERY(%d)", MAX_SINGLE_QUERY)
         return MAX_SINGLE_QUERY
 
     def _encode_payload(self, payload):
@@ -302,9 +472,9 @@ class JXCXQuery:
         import pandas as pd
 
         if not self.enabled:
-            print("[DEBUG-TABLE] JXCX 未启用，尝试进入...")
+            logger.debug("JXCX 未启用，尝试进入...")
             if not self.enter_jxcx():
-                print("[ERROR-TABLE] 无法进入即席查询模块")
+                logger.error("无法进入即席查询模块")
                 return pd.DataFrame() if to_df else {'data': []}
 
         payload_encoded = self._encode_payload(payload)
@@ -319,19 +489,19 @@ class JXCXQuery:
                     data = result['data']
                     if to_df:
                         df = pd.DataFrame(data)
-                        print(f"[SUCCESS-TABLE] 获取到 {len(df)} 行数据")
+                        logger.info("获取到 %d 行数据", len(df))
                         return df
                     else:
                         return {'data': data}
                 else:
-                    print("[WARNING-TABLE] 返回数据为空")
+                    logger.warning("返回数据为空")
                     return pd.DataFrame() if to_df else {'data': []}
             else:
-                print(f"[ERROR-TABLE] 请求失败，状态码: {res.status_code}")
+                logger.error("请求失败，状态码: %s", res.status_code)
                 return pd.DataFrame() if to_df else {'data': []}
 
         except Exception as e:
-            print(f"[ERROR-TABLE] 获取数据异常: {e}")
+            logger.error("获取数据异常: %s", e)
             import traceback
             traceback.print_exc()
             return pd.DataFrame() if to_df else {'data': []}
@@ -347,32 +517,31 @@ class JXCXQuery:
     def _get_4g_voice_table_internal(self, volte_payload, epsfb_payload):
         """获取4G语音小区报表数据（内部方法）"""
         import pandas as pd
-        import numpy as np
 
         result = {'volte': pd.DataFrame(), 'epsfb': pd.DataFrame(), 'merged': pd.DataFrame()}
 
         if not self.enabled:
-            print("[DEBUG-4G-VOICE] JXCX 未启用，尝试进入...")
+            logger.debug("JXCX 未启用，尝试进入...")
             if not self.enter_jxcx():
-                print("[ERROR-4G-VOICE] 无法进入即席查询模块")
+                logger.error("无法进入即席查询模块")
                 return result
 
-        print(f"[DEBUG-4G-VOICE] ========== 开始获取4G语音小区数据 ==========")
+        logger.info("========== 开始获取4G语音小区数据 ==========")
 
-        print("[DEBUG-4G-VOICE] 正在获取VoLTE数据...")
+        logger.info("正在获取VoLTE数据...")
         volte_df = self.get_table(volte_payload, to_df=True)
-        print(f"[DEBUG-4G-VOICE] VoLTE数据: {len(volte_df)} 行")
-        print(f"[DEBUG-4G-VOICE] VoLTE列名: {list(volte_df.columns) if not volte_df.empty else 'N/A'}")
+        logger.debug("VoLTE数据: %d 行", len(volte_df))
+        logger.debug("VoLTE列名: %s", list(volte_df.columns) if not volte_df.empty else 'N/A')
         result['volte'] = volte_df
 
-        print("[DEBUG-4G-VOICE] 正在获取EPSFB数据...")
+        logger.info("正在获取EPSFB数据...")
         epsfb_df = self.get_table(epsfb_payload, to_df=True)
-        print(f"[DEBUG-4G-VOICE] EPSFB数据: {len(epsfb_df)} 行")
-        print(f"[DEBUG-4G-VOICE] EPSFB列名: {list(epsfb_df.columns) if not epsfb_df.empty else 'N/A'}")
+        logger.debug("EPSFB数据: %d 行", len(epsfb_df))
+        logger.debug("EPSFB列名: %s", list(epsfb_df.columns) if not epsfb_df.empty else 'N/A')
         result['epsfb'] = epsfb_df
 
         if volte_df.empty and epsfb_df.empty:
-            print("[WARNING-4G-VOICE] VoLTE和EPSFB数据均为空")
+            logger.warning("VoLTE和EPSFB数据均为空")
             return result
 
         col_name_map = {
@@ -392,18 +561,18 @@ class JXCXQuery:
                 epsfb_rename[en_col] = col_name_map[en_col]
         epsfb_df = epsfb_df.rename(columns=epsfb_rename)
 
-        print(f"[DEBUG-4G-VOICE] VoLTE转换后列名: {list(volte_df.columns)}")
-        print(f"[DEBUG-4G-VOICE] EPSFB转换后列名: {list(epsfb_df.columns)}")
+        logger.debug("VoLTE转换后列名: %s", list(volte_df.columns))
+        logger.debug("EPSFB转换后列名: %s", list(epsfb_df.columns))
 
         merge_keys = []
         for key in ['时间', '小区']:
             if key in volte_df.columns:
                 merge_keys.append(key)
 
-        print(f"[DEBUG-4G-VOICE] 合并键: {merge_keys}")
+        logger.debug("合并键: %s", merge_keys)
 
         if not merge_keys:
-            print("[WARNING-4G-VOICE] 无法确定合并键，使用简单concat")
+            logger.warning("无法确定合并键，使用简单concat")
             merged_df = pd.concat([volte_df, epsfb_df], ignore_index=True)
             result['merged'] = merged_df
             return result
@@ -412,8 +581,8 @@ class JXCXQuery:
         volte_cols = [c for c in volte_df.columns if (c.startswith('volte_') or 'VoLTE' in c) and c not in common_cols]
         epsfb_cols = [c for c in epsfb_df.columns if (c.startswith('epsfb_') or 'EPSFB' in c) and c not in common_cols]
 
-        print(f"[DEBUG-4G-VOICE] VoLTE特有字段: {volte_cols}")
-        print(f"[DEBUG-4G-VOICE] EPSFB特有字段: {epsfb_cols}")
+        logger.debug("VoLTE特有字段: %s", volte_cols)
+        logger.debug("EPSFB特有字段: %s", epsfb_cols)
 
         volte_merge_cols = [c for c in merge_keys if c in volte_df.columns] + [c for c in volte_cols if c in volte_df.columns]
         if '小区名称' in volte_df.columns:
@@ -438,7 +607,7 @@ class JXCXQuery:
             else:
                 merged_df['小区名称'] = merged_df['小区名称'].fillna(merged_df['小区名称_epsfb'])
             merged_df = merged_df.drop(columns=['小区名称_epsfb'])
-            print(f"[DEBUG-4G-VOICE] 小区名称已补充（VoLTE优先，EPSFB备用）")
+            logger.debug("小区名称已补充（VoLTE优先，EPSFB备用）")
 
         merged_df = merged_df.dropna(axis=1, how='all')
 
@@ -448,8 +617,8 @@ class JXCXQuery:
             xiaoqu_idx = cols.index('小区')
             cols.insert(xiaoqu_idx + 1, '小区名称')
             merged_df = merged_df[cols]
-            print(f"[DEBUG-4G-VOICE] 已将小区名称列移到小区列后面")
+            logger.debug("已将小区名称列移到小区列后面")
 
-        print(f"[SUCCESS-4G-VOICE] 合并完成，最终数据: {len(merged_df)} 行, {len(merged_df.columns)} 列")
+        logger.info("合并完成，最终数据: %d 行, %d 列", len(merged_df), len(merged_df.columns))
         result['merged'] = merged_df
         return result

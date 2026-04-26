@@ -5,6 +5,7 @@
 """
 
 import os
+import logging
 import pandas as pd
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -12,6 +13,8 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 
 from utils.config import OUTPUT_DIR
 from utils.logger import ensure_dirs
+
+logger = logging.getLogger(__name__)
 
 
 def export_to_excel(data, filename, sheet_name='Sheet1', append=False):
@@ -33,11 +36,11 @@ def export_to_excel(data, filename, sheet_name='Sheet1', append=False):
     elif isinstance(data, pd.DataFrame):
         df = data
     else:
-        print(f"[ERROR-EXPORT] 不支持的数据格式: {type(data)}")
+        logger.warning("不支持的数据格式: %s", type(data))
         return None
 
     if df.empty:
-        print("[WARNING-EXPORT] 数据为空，不导出")
+        logger.warning("数据为空，不导出")
         return None
 
     filepath = os.path.join(OUTPUT_DIR, filename)
@@ -46,15 +49,15 @@ def export_to_excel(data, filename, sheet_name='Sheet1', append=False):
         if append and os.path.exists(filepath):
             with pd.ExcelWriter(filepath, engine='openpyxl', mode='a') as writer:
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-            print(f"[SUCCESS-EXPORT] 已追加数据到 {filepath}")
+            logger.info("已追加数据到 %s", filepath)
         else:
             df.to_excel(filepath, sheet_name=sheet_name, index=False, engine='openpyxl')
-            print(f"[SUCCESS-EXPORT] 数据已导出到 {filepath}")
+            logger.info("数据已导出到 %s", filepath)
 
         return filepath
 
     except Exception as e:
-        print(f"[ERROR-EXPORT] 导出失败: {e}")
+        logger.error("导出失败: %s", e)
         import traceback
         traceback.print_exc()
         return None
@@ -69,7 +72,7 @@ def format_excel(filepath, header_color='165DFF', font_size=11):
         font_size: 字体大小
     """
     if not os.path.exists(filepath):
-        print(f"[ERROR-FORMAT] 文件不存在: {filepath}")
+        logger.error("文件不存在: %s", filepath)
         return
 
     try:
@@ -111,10 +114,10 @@ def format_excel(filepath, header_color='165DFF', font_size=11):
             ws.column_dimensions[column_letter].width = adjusted_width
 
         wb.save(filepath)
-        print(f"[SUCCESS-FORMAT] Excel格式化完成: {filepath}")
+        logger.info("Excel格式化完成: %s", filepath)
 
     except Exception as e:
-        print(f"[ERROR-FORMAT] 格式化失败: {e}")
+        logger.error("格式化失败: %s", e)
         import traceback
         traceback.print_exc()
 
