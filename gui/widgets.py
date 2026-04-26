@@ -127,6 +127,178 @@ class DateEntry(ttk.Entry):
         return value
 
 
+class MultiSelectDropdown(ttk.Frame):
+    """带复选框的下拉选择组件"""
+    
+    GD_CITIES = ['广州', '深圳', '东莞', '佛山', '中山', '珠海', '江门', '肇庆',
+                 '惠州', '汕头', '潮州', '揭阳', '汕尾', '湛江', '茂名', '阳江',
+                 '云浮', '韶关', '梅州', '河源', '清远']
+
+    def __init__(self, parent, values, width=18, select_all=False):
+        super().__init__(parent)
+        self.values = values
+        self.var_dict = {}
+        
+        # 下拉框变量
+        self.var = tk.StringVar(value="")
+        
+        # 记录选择顺序（解决显示顺序问题）
+        self._selected_order = []
+        
+        # 创建 Entry
+        self.entry = ttk.Entry(self, textvariable=self.var, width=width, state='readonly')
+        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 创建下拉按钮
+        self.btn = ttk.Button(self, text="▼", width=3, command=self._toggle_dropdown)
+        self.btn.pack(side=tk.LEFT)
+        
+        # 创建下拉窗口
+        self.dropdown = tk.Toplevel(self)
+        self.dropdown.withdraw()
+        self.dropdown.overrideredirect(True)
+        self.dropdown.attributes('-topmost', True)
+        
+        # 复选框容器
+        self.check_frame = ttk.Frame(self.dropdown)
+        self.check_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        
+        self.check_vars = {}
+        for val in values:
+            var = tk.BooleanVar(value=False)
+            self.check_vars[val] = var
+            cb = ttk.Checkbutton(
+                self.check_frame, text=val, variable=var,
+                command=lambda v=val: self._on_check_change(v)
+            )
+            cb.pack(anchor=tk.W, padx=5, pady=1)
+        
+        # 全选按钮
+        btn_frame = ttk.Frame(self.dropdown)
+        btn_frame.pack(fill=tk.X, padx=2, pady=2)
+        ttk.Button(btn_frame, text="全选", command=self._select_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="取消", command=self._deselect_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="确定", command=self._confirm).pack(side=tk.RIGHT, padx=2)
+        
+        # 初始全选
+        if select_all:
+            self._select_all()
+    
+    def _toggle_dropdown(self):
+        """切换下拉框显示"""
+        if self.dropdown.winfo_viewable():
+            self.dropdown.withdraw()
+        else:
+            self._show_dropdown()
+    
+    def _show_dropdown(self):
+        """显示下拉框（自适应屏幕空间）"""
+        self.dropdown.update_idletasks()
+
+        # 获取 Entry 的位置和尺寸
+        entry_x = self.entry.winfo_rootx()
+        entry_y = self.entry.winfo_rooty()
+        entry_h = self.entry.winfo_height()
+
+        # 获取下拉框的所需尺寸
+        dropdown_w = self.dropdown.winfo_reqwidth()
+        dropdown_h = self.dropdown.winfo_reqheight()
+
+        # 获取屏幕工作区域尺寸（排除任务栏等）
+        screen_w = self.dropdown.winfo_screenwidth()
+        screen_h = self.dropdown.winfo_screenheight()
+
+        # 计算下方和上方可用的空间
+        space_below = screen_h - (entry_y + entry_h)
+        space_above = entry_y
+
+        # 判断应该显示在上方还是下方
+        # 优先显示在下方，如果下方空间不够但上方够用，则显示在上方
+        if space_below >= dropdown_h or space_below >= space_above:
+            # 显示在下方
+            y = entry_y + entry_h
+        else:
+            # 显示在上方
+            y = entry_y - dropdown_h
+
+        # 确保不会超出屏幕左右边界
+        if entry_x + dropdown_w > screen_w:
+            x = screen_w - dropdown_w
+        else:
+            x = entry_x
+
+        # 确保不会超出屏幕上边界
+        if y < 0:
+            y = 0
+
+        self.dropdown.geometry(f"{dropdown_w}x{dropdown_h}+{x}+{y}")
+        self.dropdown.deiconify()
+        self.dropdown.lift()
+    
+    def _on_check_change(self, val=None):
+        """复选框状态变化 - 记录选择顺序"""
+        if val is not None:
+            var = self.check_vars.get(val)
+            if var:
+                if var.get():
+                    # 选中：添加到顺序列表（避免重复）
+                    if val not in self._selected_order:
+                        self._selected_order.append(val)
+                else:
+                    # 取消选中：从顺序列表移除
+                    if val in self._selected_order:
+                        self._selected_order.remove(val)
+    
+    def _select_all(self):
+        """全选"""
+        self._selected_order = list(self.values)  # 按values顺序记录
+        for var in self.check_vars.values():
+            var.set(True)
+    
+    def _deselect_all(self):
+        """取消全选"""
+        self._selected_order = []
+        for var in self.check_vars.values():
+            var.set(False)
+    
+    def _confirm(self):
+        """确认选择"""
+        # 使用记录的选择顺序返回，而不是字典遍历顺序
+        selected = [val for val in self._selected_order if val in self.check_vars and self.check_vars[val].get()]
+        if selected:
+            self.var.set(','.join(selected))
+        else:
+            self.var.set("")
+        self.dropdown.withdraw()
+    
+    def get_selected(self):
+        """获取选中的值列表"""
+        return [val for val, var in self.check_vars.items() if var.get()]
+    
+    def set_selected(self, values):
+        """设置选中的值"""
+        # 先清空选择顺序
+        self._selected_order = []
+        for val, var in self.check_vars.items():
+            var.set(val in values)
+            if val in values:
+                self._selected_order.append(val)
+        if values:
+            self.var.set(','.join(values))
+        else:
+            self.var.set("")
+    
+    def get_value(self):
+        """获取选中值（逗号分隔字符串）"""
+        return self.var.get()
+    
+    def set_value(self, value):
+        """设置选中值（逗号分隔字符串）"""
+        if value:
+            values = [v.strip() for v in value.split(',')]
+            self.set_selected(values)
+
+
 class TableConfig:
     """数据表配置类"""
 

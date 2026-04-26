@@ -168,10 +168,11 @@ def verify_license(machine_code):
 
         AES_KEY = b"GMCCLicenseV2Key"
         try:
+            # 授权工具中的加密数据经过了 base64 编码
             import base64
             encrypted_bytes = base64.b64decode(encrypted_data)
             decrypted = aes_decrypt(encrypted_bytes, AES_KEY)
-            expiry_str = decrypted.split(b'|')[0].decode('utf-8')
+            expiry_str = decrypted.split('|')[0]
 
             expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
             if datetime.now() > expiry_date:
